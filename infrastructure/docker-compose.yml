@@ -1,0 +1,69 @@
+# ==============================================================
+# NIDS MVP — Docker Compose Orchestration
+#
+# Services:
+#   1. ebpf-listener: eBPF/XDP data plane + ML inference
+#   2. api:           FastAPI backend for external consumption
+#
+# Requirements:
+#   - Docker Engine with Linux containers
+#   - Host must have Linux kernel >= 4.15 for XDP support
+#   - Run with: docker-compose up --build
+#
+# Note: The eBPF container requires privileged mode and host
+#       network access to attach XDP programs to the NIC.
+# ==============================================================
+
+version: "3.8"
+
+services:
+  # ── eBPF Data Plane Listener ──────────────────────────────────
+  ebpf-listener:
+    build:
+      context: ..
+      dockerfile: infrastructure/Dockerfile.ebpf
+    container_name: nids-ebpf
+    privileged: true        # Required for BPF syscalls
+    network_mode: host      # Required for raw NIC access
+    cap_add:
+      - SYS_ADMIN           # Required for bpf() syscall
+      - NET_ADMIN            # Required for XDP attach
+    volumes:
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+      - /lib/modules:/lib/modules:ro
+      - /usr/src:/usr/src:ro
+      - ../isolation_forest_model.pkl:/app/isolation_forest_model.pkl:ro
+      - ../scaler.pkl:/app/scaler.pkl:ro
+      - ../top_features.pkl:/app/top_features.pkl:ro
+      - ../optimal_threshold.pkl:/app/optimal_threshold.pkl:ro
+    environment:
+      - NIDS_INTERFACE=eth0
+      - NIDS_API_URL=http://localhost:8000
+    restart: unless-stopped
+    command: >
+      python -m src.ebpf.user_space
+      --interface ${NIDS_INTERFACE:-eth0}
+      --artifacts-dir /app
+      --api http://localhost:8000
+
+  # ── FastAPI Backend ───────────────────────────────────────────
+  api:
+    build:
+      context: ..
+      dockerfile: infrastructure/Dockerfile.api
+    container_name: nids-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../isolation_forest_model.pkl:/app/isolation_forest_model.pkl:ro
+      - ../scaler.pkl:/app/scaler.pkl:ro
+      - ../top_features.pkl:/app/top_features.pkl:ro
+      - ../optimal_threshold.pkl:/app/optimal_threshold.pkl:ro
+    environment:
+      - NIDS_ARTIFACTS_DIR=/app
+    restart: unless-stopped
+    command: >
+      python -m src.api.server
+      --host 0.0.0.0
+      --port 8000
+      --artifacts-dir /app

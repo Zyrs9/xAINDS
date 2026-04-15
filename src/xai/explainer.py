@@ -303,9 +303,11 @@ class NIDSExplainer:
         else:
             current_shap = shap_values.flatten()
 
-        base_value = float(self.tree_explainer.expected_value)
-        if isinstance(self.tree_explainer.expected_value, np.ndarray):
-            base_value = float(self.tree_explainer.expected_value[0])
+        ev = self.tree_explainer.expected_value
+        if isinstance(ev, np.ndarray):
+            base_value = float(ev.flat[0])
+        else:
+            base_value = float(ev)
 
         return current_shap, base_value
 

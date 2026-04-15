@@ -25,6 +25,7 @@ Author: NIDS Research Team
 """
 
 import sys
+import os
 import json
 import argparse
 import logging
@@ -32,6 +33,12 @@ import numpy as np
 import joblib
 from pathlib import Path
 from typing import Dict, Optional
+
+# Fix Windows terminal encoding (cp1254/cp1252 can't render Unicode box chars)
+if sys.platform == "win32":
+    os.system("")  # Enable ANSI escape codes on Windows 10+
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -132,21 +139,20 @@ def print_feature_table(features: Dict[str, float], highlight_feature: str = Non
 # Built-in Anomalous Sample (for demo without external files)
 # ---------------------------------------------------------------------------
 
-# This flow mimics a data exfiltration pattern:
-# - Very high OUT_BYTES (bulk upload)
-# - Many small packets (reconnaissance + overhead)
-# - Unusual TTL values (multi-hop proxy)
+# This flow mimics a borderline data exfiltration pattern:
+# - OUT_BYTES is just above the anomaly threshold — dominant driver
+# - Reducing OUT_BYTES by 50% flips the verdict to NORMAL (causality proof)
 BUILTIN_ANOMALOUS_FLOW = {
-    "MIN_TTL": 12.0,
-    "MAX_TTL": 245.0,
-    "SHORTEST_FLOW_PKT": 40.0,
+    "MIN_TTL": 62.0,
+    "MAX_TTL": 64.0,
+    "SHORTEST_FLOW_PKT": 54.0,
     "LONGEST_FLOW_PKT": 1500.0,
-    "MIN_IP_PKT_LEN": 20.0,
+    "MIN_IP_PKT_LEN": 40.0,
     "MAX_IP_PKT_LEN": 1480.0,
-    "OUT_BYTES": 985000.0,
-    "OUT_PKTS": 1200.0,
-    "DST_TO_SRC_SECOND_BYTES": 4500.0,
-    "NUM_PKTS_UP_TO_128_BYTES": 950.0,
+    "OUT_BYTES": 80000.0,
+    "OUT_PKTS": 45.0,
+    "DST_TO_SRC_SECOND_BYTES": 8500.0,
+    "NUM_PKTS_UP_TO_128_BYTES": 12.0,
 }
 
 

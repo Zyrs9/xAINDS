@@ -1,9 +1,22 @@
-scapy
-numpy
-pandas
-scikit-learn
-shap
-fastapi
-uvicorn
-joblib
-requests
+# NIDS MVP — Python Dependencies
+# No Scapy. No synthetic data. No legacy.
+
+# Core ML
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+joblib>=1.3.0
+
+# Explainability
+shap>=0.45.0
+
+# API
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.6.0
+
+# HTTP Client (for eBPF → API forwarding)
+requests>=2.31.0
+
+# Benchmark
+psutil>=5.9.0
