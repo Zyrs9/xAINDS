@@ -1,3 +1,9 @@
 nids-wireframe/*
 Yeni klasör/*
 NF-UNSW-NB15-v2.csv
+__pycache__/
+*.pyc
+*.pyo
+nvp_baseline/__pycache__/
+nvp_baseline/**/__pycache__/
+.env
