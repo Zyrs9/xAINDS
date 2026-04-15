@@ -1,0 +1,3542 @@
+================================================================================
+File: .gitignore
+================================================================================
+
+nids-wireframe/*
+Yeni klasör/*
+NF-UNSW-NB15-v2.csv
+__pycache__/
+*.pyc
+*.pyo
+nvp_baseline/__pycache__/
+nvp_baseline/**/__pycache__/
+.env
+
+
+================================================================================
+File: Makefile
+================================================================================
+
+# ==============================================================
+# NIDS MVP — Makefile
+#
+# Build, train, and deploy the eBPF-powered NIDS system.
+#
+# Usage:
+#   make install        — Install Python dependencies
+#   make train          — Train model on UNSW-NB15 dataset
+#   make compile-ebpf   — Compile eBPF C code (Linux only)
+#   make api            — Start FastAPI dev server
+#   make demo           — Run counterfactual SHAP demo
+#   make build          — Build Docker images
+#   make deploy         — Deploy with Docker Compose
+#   make benchmark      — Run NVP vs MVP performance benchmark
+#   make clean          — Remove build artifacts
+# ==============================================================
+
+.PHONY: install train api demo build deploy benchmark \
+        stop clean test offline-test help
+
+# Variables
+PYTHON      ?= python3
+PIP         ?= pip
+INTERFACE   ?= eth0
+DATASET     ?= NF-UNSW-NB15-v2.csv
+COMPOSE     := docker-compose -f infrastructure/docker-compose.yml
+
+# ── Help ──────────────────────────────────────────────────────
+help:
+	@echo ""
+	@echo "  NIDS MVP — Available Commands"
+	@echo "  ─────────────────────────────────────────────────"
+	@echo "  make install        Install Python dependencies"
+	@echo "  make train          Train Isolation Forest on UNSW-NB15"
+	@echo "  make api            Start FastAPI dev server"
+	@echo "  make demo           Run counterfactual SHAP demo"
+	@echo "  make offline-test   Test eBPF pipeline without kernel"
+	@echo "  make build          Build Docker images"
+	@echo "  make deploy         Start Docker Compose stack"
+	@echo "  make stop           Stop Docker Compose stack"
+	@echo "  make benchmark      Run NVP vs MVP benchmark"
+	@echo "  make clean          Remove build artifacts"
+	@echo ""
+
+# ── Phase 0: Setup ────────────────────────────────────────────
+install:
+	$(PIP) install -r requirements.txt
+
+
+# ── Phase 2: ML Training ─────────────────────────────────────
+train:
+	@echo "Training model on $(DATASET)..."
+	$(PYTHON) -m src.ml.train_baseline
+	@echo "[✔] Training complete. Check .pkl artifacts."
+
+# ── Phase 2: XAI Demo ────────────────────────────────────────
+demo:
+	$(PYTHON) -m src.xai.counterfactual_demo
+
+demo-auto:
+	$(PYTHON) -m src.xai.counterfactual_demo --auto
+
+# ── Phase 3: API Server ──────────────────────────────────────
+api:
+	$(PYTHON) -m src.api.server --reload
+
+# ── Phase 1: eBPF Listener ───────────────────────────────────
+listen:
+	sudo $(PYTHON) -m src.ebpf.user_space --interface $(INTERFACE)
+
+offline-test:
+	$(PYTHON) -m src.ebpf.user_space --offline
+
+# ── Phase 3: Docker ──────────────────────────────────────────
+build:
+	$(COMPOSE) build
+
+deploy:
+	$(COMPOSE) up -d
+	@echo "[✔] NIDS MVP deployed. API at http://localhost:8000"
+
+stop:
+	$(COMPOSE) down
+
+logs:
+	$(COMPOSE) logs -f
+
+# ── Phase 4: Benchmark ───────────────────────────────────────
+benchmark:
+	@echo "Starting NVP vs MVP performance benchmark..."
+	$(PYTHON) benchmark/metrics_collector.py
+
+# ── Cleanup ───────────────────────────────────────────────────
+clean:
+	@echo "Cleaning build artifacts..."
+	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	find . -name "*.pyc" -delete 2>/dev/null || true
+	@echo "[✔] Clean complete."
+
+
+================================================================================
+File: README.md
+================================================================================
+
+# AI-Driven Lightweight NIDS: An eBPF-Powered Edge-to-Cloud Architecture 
+
+Bu proje, IEEE standartlarında akademik bir Ağ Saldırı Tespit Sistemi (NIDS) prototipidir. Sistem, yüksek performanslı **eBPF/XDP** (Data Plane) teknolojisini, **Cost-Sensitive (Maliyet Duyarlı) Machine Learning** algoritmalarını ve **Counterfactual SHAP** tabanlı Açıklanabilir Yapay Zeka'yı (XAI) bir araya getirerek sıfır-RTT (%100 tel hızında) çalışan, şeffaf ve güçlü bir güvenlik mimarisi sunar.
+
+---
+
+## 1. Klasör ve Mimari Yapısı
+
+Proje, kavramların (Data Plane, ML, XAI, API) birbirinden kesin sınırlarla ayrıldığı modüler bir mimariye sahiptir.
+
+| Dizin | Amaç ve Açıklama |
+|---|---|
+| `nvp_baseline/` | **Kum Torbası (Legacy):** Projenin eBPF'e geçmeden önceki `Scapy` tabanlı, kullanıcı alanı (user-space) darboğazına sahip eski ve yavaş versiyonu. Sadece performans benchmark testlerinde "eBPF'in neden gerekli olduğunu" kanıtlamak için dondurulmuş bir referans noktası olarak tutulmaktadır. |
+| `src/ebpf/` | **Zero-Copy Data Plane:** Sistem ağ trafiğini dinleyen ve özellik çıkartan (feature extraction) çekirdek (kernel) modülleridir. |
+| `src/ml/` | **Maliyet Duyarlı Çıkarım Motoru:** Gerçek ağ verisi (UNSW-NB15) ile eğitilen ve SOC (Security Operations Center) uyarı yorgunluğunu önleyen ML motoru. |
+| `src/xai/` | **Açıklanabilir Yapay Zeka (XAI):** "Yapay Zeka bu kararı neden verdi?" sorusunu Neden-Sonuç (Causality) prensibiyle ispatlayan açıklayıcı modül. |
+| `src/api/` | **Dışa Aktarım (Presentation):** Kararların dış sistemlere veya bir UI Dashboard'a iletilmesini sağlayan uç nokta. |
+| `infrastructure/` | **DevOps:** Sistemin farklı ortamlarda sorunsuz çalıştırılabilmesi için gerekli olan konteynerizasyon dosyaları. |
+| `benchmark/` | **Akademik Kanıt:** eBPF mimarisi ile `nvp_baseline` arasındaki CPU/RAM farklarını ispatlamak için yazılan canlı test script'leri. |
+
+---
+
+## 2. Dosyaların Etkileşim Haritası ve Görevleri
+
+Sistemdeki kritik dosyaların birbirleriyle nasıl bir yaşam döngüsü içerisinde çalıştığı aşağıda açıklanmıştır:
+
+### A) Ağ Veri Düzlemi (Data Plane)
+*   **`src/ebpf/flow_tracker.c`**: Ağ kartına (NIC) tutunan XDP C programı. DDoS taşkınlarına (SYN flood) karşı korumalı `BPF_MAP_TYPE_LRU_HASH` mimarisiyle saniyede milyonlarca paket hızında 10 istatistiksel özelliği hesaplar. *(Not: XDP seviyesinde IP de-fragmentation desteklenmediğinden, parçalanmış paket saldırıları bilinen bir zafiyettir (Limitation).*
+*   **`src/ebpf/user_space.py`**: Zero-RTT kuralı gereği ML Çıkarımını (Inference) asıl yapan Python köprüsü. Elde edilen analiz (`DetectionResult`) raporlarını asenkron (Thread+Queue) olarak API'ye (Control Plane) ileterek çekirdeğin paket okumasını senkron ağ G/Ç I/O'su ile bloke etmekten korur.
+
+### B) Makine Öğrenmesi (Machine Learning Core)
+*   **`src/ml/train_baseline.py`**: Geliştiricinin bir kez çalıştırdığı eğitim betiği. `NF-UNSW-NB15-v2.csv` veri setini okur, Random Forest ile en önemli 10 özelliği seçer, İzolasyon Ormanı (Isolation Forest) modelini eğitir. Siber güvenlikte False Negative (atağı kaçırma) cezası False Positive'den yüksek olduğu için (1'e 10 kuralı) Maliyet Duyarlı Threshold (Eşik) hesaplar ve `.pkl` dosyalarını kök dizine kaydeder.
+*   **`src/ml/engine.py`**: Gerçek zamanlı (Live-inference) tahmin motoru. Paket seviyesinde uyarı yorgunluğunu engellemek için tasarlanmış, O(1) hesapsal maliyete sahip (Running Sum/Variance) ve bellek sızıntısını engelleyen `deque` altyapılı `SpikeDetector` mekanizması barındırır.
+
+### C) Açıklanabilirlik (Explainable AI - XAI)
+*   **`src/xai/explainer.py`**: Makine öğrenmesinden çıkan kararın arkasındaki nedeni arar. SHAP (SHapley Additive exPlanations) kullanılarak hangi özelliğin anomaliteye ne kadar etki ettiği hesaplanır. Doğal Dil Üretimi (NLG) motoru ve **MITRE ATT&CK** veritabanı eşleştirmesi ile SHAP değerlerini *(örn: T1048 - Exfiltration)* SOC analisti için insan diline çevirir.
+*   **`src/xai/counterfactual_demo.py`**: Projenin Masterpiece (Sanat Eseri) dosyasıdır. Jürinin "Bu model gerçekten olayları anlıyor mu, yoksa ezberledi mi?" sorusunu yanıtlar. Modelin anomalite kararı kıldığı bir ağ trafiğindeki en baskın özelliği (Örn: OUT_BYTES) bulur. Kullanıcıdan bu sayıyı yapay olarak %50 düşürmesini ister. Yeni simülasyonda kararın ANOMALY'den NORMAL'e döndüğünü matematiksel olarak ispatlar (Causality Proven).
+
+### D) Altyapı ve Sunum (Control Plane)
+*   **`src/api/server.py`**: Tüm sistemin Control Plane (Kontrol Düzlemi) ayağı. Ayrık beyin (Split-Brain) yaşamamak adına ML çıkarım motorunu asla çalıştırmaz, sadece User-Space'den gelen tespit raporlarını kabul eder. Depolama, loglama ve `/explain` (SHAP XAI) raporlarını web arayüzüne sunma işlemlerini yönetir.
+*   **`benchmark/metrics_collector.py` & `traffic_replay.sh`**: Canlı bir deneme ortamında (PCAP dosyasını tekrar oynatarak) `nvp_baseline` ile yeni eBPF mimarisinin CPU/RAM tüketimlerini milisaniyelik boyutta toplayıp, makale grafikleri için `.csv` formatında dışarı veren sistem.
+*   **`Makefile`**: Bütün sistemi komut satırı tek satırlık komutlarla (örn: `make train`, `make deploy`) yönetmeyi sağlayan orkestratör betik.
+
+---
+
+## 3. Çevre Kurulumu ve Çalıştırma Adımları
+
+Sistem eBPF kullandığı için gereksinimleri platformlara göre değişiklik gösterir.
+
+### Seçenek 1: Canlı Ağ İzleme Modu (Linux / Ubuntu 22.04+)
+> Bu sürüm sistemin tüm özellikleriyle (Gerçek zamanlı XDP paket okuma) çalıştığı üretim (Production) ve test ortamıdır.
+
+**Gereksinimler:**
+*   **Linux Kernel 5.10+** (Modern BPF yardımcı programları ve CO-RE/BCC stabilitesi için zorunludur).
+*   Donanım Sanallaştırması veya Fiziksel Makine (`eth0`, `ens33` gibi gerçek bir NIC Interface'i).
+*   Gerekli kütüphaneler: `sudo apt install bpfcc-tools python3-bpfcc libbpf-dev clang llvm linux-headers-$(uname -r)`
+
+**Çalıştırma Adımları:**
+1. Veri seti kök dizinde (`NF-UNSW-NB15-v2.csv`) bulunmalıdır.
+2. Bağımlılıkları kurun: `make install`
+3. Arka plan modeli eğitin: `make train` (Bu adım `.pkl` model dosyalarını üretecektir).
+4. Data Plane'i dinlemeye ve gerçek zamanlı tahminleri görmeye başlayın: `sudo python -m src.ebpf.user_space --interface eth0`
+
+### Seçenek 2: Geliştirme, Analiz ve Sunum Modu (Windows/macOS)
+> Makineniz Kernel 5.10 desteklemiyorsa, işletim sisteminden bağımsız olarak model eğitme, Counterfactual XAI çalışması yapma ve API server'ı ayağa kaldırma imkanı sunar. XDP veri çekme özelliği offline simüle edilir.
+
+**Gereksinimler:**
+*   Python 3.10+
+
+**Çalıştırma Adımları:**
+1. Bağımlılıkları kurun: `pip install -r requirements.txt`
+2. Modeli eğitin: `python -m src.ml.train_baseline`
+3. **Akademik Demoyu İzleyin:** Nedensellik (Causality) analizinin nasıl çalıştığını ispatlayan konsolu başlatın: `python -m src.xai.counterfactual_demo --auto`
+4. **API Sunucusunu Başlatın:** `python -m src.api.server` komutu ile port 8000 üzerinden analiz API'sini açın. Dilerseniz offline modda simüle ağ trafik verisi göndermek için `python -m src.ebpf.user_space --offline` kullanabilirsiniz.
+
+### Seçenek 3: Docker-Compose (Uçtan Uca Deployment)
+> İzole bir ortamda eBPF ve API sunucusunu birlikte kaldırmak için kullanılır (Host makine Linux olmalıdır).
+
+1. `make build` (İmajları derler)
+2. `make deploy` (Root yetkileri ile XDP listener ve API Backend'i ayağa kaldırır)
+
+---
+
+## 4. Gelecek Adımlar (ROADMAP / TO-DO)
+
+Bu modüller şu anda başarıyla çalışsa da projenin "Ürün" (Product) seviyesine gelmesi ve makalenin gücünü katlaması için şu adımlar planlanmaktadır:
+
+- [ ] **Görsel Ön Yüz (Frontend Dashboard):**
+  - **Açıklama:** Terminal çıktılarını ve API üzerindeki verileri anlık grafiklere (Chart.js / Recharts) dökecek olan şık bir Next.js veya React web arayüzü yazılması. 
+  - **Tercih Edilen Teknoloji:** Vanilla JS : otherwise Next.js/React is over engineering.
+  - **Amacı:** MITRE ATT&CK matris eşleşmelerinin ve SHAP değerlerinin jüri/kullanıcıya görsel şov eşliğinde gösterilmesi.
+- [ ] **Kalıcı Loglama (PostgreSQL / SQLite Storage):**
+  - **Açıklama:** Belirlenen uyarıların, maliyet kaybı istatistiklerinin salt API belleğinden çıkarılıp ACID prensipleriyle kalıcı bir veritabanlarına işlenmesi.
+  - **Tercih Edilen Teknoloji:** SQLite : otherwise PostgreSQL is over engineering.
+  - **Amacı:** Geriye dönük sorgulama (Querying) yapılabilmesi ve bir siber olay tepki (Incident Response) modülü yazılması için altyapı hazırlanması.
+- [ ] **Grafik Üreteçleri (Matplotlib Integration):**
+  - **Açıklama:** `benchmark/metrics_collector.py` ve SHAP değerlerinden çıkan matematiksel hesaplamaları doğrudan PDF üzerinde basılabilecek LaTeX veya PGFPlots grafikleri şeklinde dışa aktaran script'in modüle bağlanması.
+  - **Amacı:** Yazılacak IEEE Paper'ın Experiment & Results bölümünün direkt model verisinden, hiç el değmeden üretilmesi.
+- [ ] **Kapsamlı Sızma Testleri:**
+  - **Açıklama:** VMWare üzerindeki izole test topolojisinde (Kali Linux & Ubuntu Node), gerçek metotlar *(örn: Hping3, Nmap, Metasploit)* kullanarak eBPF çekirdeğinin yakaladığı trafikler ile Isolation Forest'ın eş zamanlı reaksiyon vermesinin videoya alınması.
+
+
+================================================================================
+File: requirements.txt
+================================================================================
+
+# NIDS MVP — Python Dependencies
+# No Scapy. No synthetic data. No legacy.
+
+# Core ML
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+joblib>=1.3.0
+
+# Explainability
+shap>=0.45.0
+
+# API
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.6.0
+
+# HTTP Client (for eBPF → API forwarding)
+requests>=2.31.0
+
+# Benchmark
+psutil>=5.9.0
+
+
+================================================================================
+File: threshold_sensitivity.json
+================================================================================
+
+{
+  "cost_ratios": {
+    "1:5": 0.15364290456686241,
+    "1:10": 0.15364290456686241,
+    "1:20": 0.15452181939963588
+  },
+  "validation_metrics": {
+    "threshold": 0.15364290456686241,
+    "precision": 0.4397152887991151,
+    "recall": 0.9618641838935353,
+    "f1_score": 0.6035282274700068,
+    "confusion_matrix": {
+      "TP": 18286,
+      "FP": 23300,
+      "FN": 725,
+      "TN": 435744
+    }
+  }
+}
+
+================================================================================
+File: benchmark\metrics_collector.py
+================================================================================
+
+"""
+NIDS Benchmark — CPU/RAM Metrics Collector
+
+Collects system resource metrics at sub-second intervals for side-by-side
+comparison between the NVP (Scapy) and MVP (eBPF) architectures.
+
+Output:
+    CSV file with columns: timestamp, cpu_percent, ram_mb, ram_percent
+    Suitable for direct import into matplotlib/LaTeX pgfplots for the
+    IEEE paper's performance comparison figures (Section V).
+
+Usage:
+    # Monitor current system for 60 seconds:
+    python benchmark/metrics_collector.py --duration 60 --output nvp_metrics.csv
+
+    # Monitor a specific process:
+    python benchmark/metrics_collector.py --pid 12345 --duration 60
+
+    # Side-by-side benchmark (run on each system separately):
+    # Terminal 1 (NVP VM):
+    python benchmark/metrics_collector.py --duration 120 --output results/nvp_cpu.csv
+    # Terminal 2 (MVP VM):
+    python benchmark/metrics_collector.py --duration 120 --output results/mvp_cpu.csv
+
+Author: NIDS Research Team
+"""
+
+import os
+import sys
+import csv
+import time
+import signal
+import argparse
+import logging
+from pathlib import Path
+from datetime import datetime
+
+try:
+    import psutil
+except ImportError:
+    print("[✘] psutil is required: pip install psutil")
+    sys.exit(1)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger("nids.benchmark")
+
+
+# ---------------------------------------------------------------------------
+# Colors for terminal output
+# ---------------------------------------------------------------------------
+
+class C:
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    CYAN = "\033[96m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RESET = "\033[0m"
+
+
+def cpu_bar(pct: float, width: int = 30) -> str:
+    """Render a colored CPU usage bar."""
+    filled = int(pct / 100 * width)
+    empty = width - filled
+
+    if pct >= 80:
+        color = C.RED
+    elif pct >= 50:
+        color = C.YELLOW
+    else:
+        color = C.GREEN
+
+    return f"{color}{'█' * filled}{'░' * empty}{C.RESET} {pct:5.1f}%"
+
+
+def ram_bar(pct: float, width: int = 15) -> str:
+    """Render a colored RAM usage bar."""
+    filled = int(pct / 100 * width)
+    empty = width - filled
+
+    if pct >= 80:
+        color = C.RED
+    elif pct >= 50:
+        color = C.YELLOW
+    else:
+        color = C.GREEN
+
+    return f"{color}{'█' * filled}{'░' * empty}{C.RESET} {pct:5.1f}%"
+
+
+# ---------------------------------------------------------------------------
+# System-wide Collector
+# ---------------------------------------------------------------------------
+
+def collect_system_metrics(duration: float, interval: float,
+                           output_path: str, label: str = "system"):
+    """
+    Collect system-wide CPU and RAM metrics.
+
+    Args:
+        duration: Total collection time in seconds (0 = infinite).
+        interval: Sampling interval in seconds.
+        output_path: CSV output file path.
+        label: Label for the metrics run (e.g., "NVP" or "MVP").
+    """
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    print()
+    print(f"{C.BOLD}{C.CYAN}{'=' * 70}{C.RESET}")
+    print(f"{C.BOLD}{C.CYAN}  NIDS BENCHMARK — System Metrics Collector{C.RESET}")
+    print(f"{C.BOLD}{C.CYAN}{'=' * 70}{C.RESET}")
+    print(f"  Label:       {label}")
+    print(f"  Duration:    {duration}s" if duration > 0 else "  Duration:    Infinite (Ctrl+C to stop)")
+    print(f"  Interval:    {interval}s")
+    print(f"  Output:      {output_file}")
+    print(f"  CPU Cores:   {psutil.cpu_count(logical=True)}")
+    print(f"  Total RAM:   {psutil.virtual_memory().total / (1024**3):.1f} GB")
+    print(f"{C.BOLD}{C.CYAN}{'=' * 70}{C.RESET}")
+    print()
+
+    # CSV setup
+    fieldnames = [
+        "timestamp", "elapsed_seconds", "label",
+        "cpu_percent", "cpu_per_core",
+        "ram_used_mb", "ram_percent", "ram_available_mb"
+    ]
+
+    with open(output_file, "w", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+
+        # Header for live display
+        print(f"  {'Time':^10s} │ {'Elapsed':^8s} │ {'CPU':^38s} │ {'RAM':^24s} │ {'RAM MB':>8s}")
+        print(f"  {'─' * 10} │ {'─' * 8} │ {'─' * 38} │ {'─' * 24} │ {'─' * 8}")
+
+        running = True
+        start_time = time.time()
+        samples = 0
+
+        def stop_handler(sig, frame):
+            nonlocal running
+            running = False
+
+        signal.signal(signal.SIGINT, stop_handler)
+
+        # Prime the CPU counter (first call always returns 0)
+        psutil.cpu_percent(interval=None)
+
+        while running:
+            now = time.time()
+            elapsed = now - start_time
+
+            if duration > 0 and elapsed >= duration:
+                break
+
+            # Collect metrics
+            cpu_pct = psutil.cpu_percent(interval=None)
+            per_core = psutil.cpu_percent(percpu=True)
+            mem = psutil.virtual_memory()
+            ram_used_mb = mem.used / (1024 ** 2)
+            ram_available_mb = mem.available / (1024 ** 2)
+
+            # Write CSV row
+            writer.writerow({
+                "timestamp": datetime.now().isoformat(),
+                "elapsed_seconds": round(elapsed, 3),
+                "label": label,
+                "cpu_percent": round(cpu_pct, 1),
+                "cpu_per_core": str([round(c, 1) for c in per_core]),
+                "ram_used_mb": round(ram_used_mb, 1),
+                "ram_percent": round(mem.percent, 1),
+                "ram_available_mb": round(ram_available_mb, 1),
+            })
+            csvfile.flush()
+            samples += 1
+
+            # Live terminal display
+            timestamp = time.strftime("%H:%M:%S")
+            print(
+                f"  {timestamp:^10s} │ {elapsed:7.1f}s │ "
+                f"{cpu_bar(cpu_pct)} │ "
+                f"{ram_bar(mem.percent)} │ "
+                f"{ram_used_mb:7.0f}M",
+                end="\r" if sys.stdout.isatty() else "\n"
+            )
+
+            # Sleep until next sample
+            sleep_time = max(0, interval - (time.time() - now))
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+    # Summary
+    print()
+    print()
+    print(f"{C.BOLD}  ── Collection Complete ──{C.RESET}")
+    print(f"  Samples:   {samples}")
+    print(f"  Duration:  {time.time() - start_time:.1f}s")
+    print(f"  Output:    {output_file.resolve()}")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Process-specific Collector
+# ---------------------------------------------------------------------------
+
+def collect_process_metrics(pid: int, duration: float, interval: float,
+                            output_path: str, label: str = "process"):
+    """
+    Collect metrics for a specific process (by PID).
+    Useful for isolating NIDS resource consumption.
+    """
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        logger.error(f"Process {pid} not found.")
+        return
+
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n  Monitoring PID {pid}: {proc.name()}")
+    print(f"  Output: {output_file}\n")
+
+    fieldnames = [
+        "timestamp", "elapsed_seconds", "label", "pid",
+        "cpu_percent", "ram_rss_mb", "ram_vms_mb",
+        "threads", "status"
+    ]
+
+    with open(output_file, "w", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+
+        running = True
+        start_time = time.time()
+
+        def stop_handler(sig, frame):
+            nonlocal running
+            running = False
+
+        signal.signal(signal.SIGINT, stop_handler)
+
+        while running:
+            now = time.time()
+            elapsed = now - start_time
+
+            if duration > 0 and elapsed >= duration:
+                break
+
+            try:
+                cpu_pct = proc.cpu_percent(interval=None)
+                mem_info = proc.memory_info()
+
+                writer.writerow({
+                    "timestamp": datetime.now().isoformat(),
+                    "elapsed_seconds": round(elapsed, 3),
+                    "label": label,
+                    "pid": pid,
+                    "cpu_percent": round(cpu_pct, 1),
+                    "ram_rss_mb": round(mem_info.rss / (1024 ** 2), 1),
+                    "ram_vms_mb": round(mem_info.vms / (1024 ** 2), 1),
+                    "threads": proc.num_threads(),
+                    "status": proc.status(),
+                })
+                csvfile.flush()
+
+                timestamp = time.strftime("%H:%M:%S")
+                rss = mem_info.rss / (1024 ** 2)
+                print(
+                    f"  [{timestamp}] CPU: {cpu_pct:5.1f}% │ "
+                    f"RSS: {rss:7.1f} MB │ "
+                    f"Threads: {proc.num_threads()}",
+                    end="\r"
+                )
+
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                logger.warning(f"Process {pid} terminated or access denied.")
+                break
+
+            time.sleep(interval)
+
+    print(f"\n\n  Collection complete: {output_file.resolve()}\n")
+
+
+# ---------------------------------------------------------------------------
+# CLI Entry Point
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="NIDS Benchmark — System Resource Metrics Collector",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # System-wide, 2 minutes, half-second sampling:
+  python benchmark/metrics_collector.py --duration 120 --interval 0.5 --output nvp_bench.csv
+
+  # Monitor specific NIDS process:
+  python benchmark/metrics_collector.py --pid 12345 --duration 60
+
+  # Infinite collection (stop with Ctrl+C):
+  python benchmark/metrics_collector.py --duration 0 --output live_metrics.csv
+        """
+    )
+    parser.add_argument(
+        "--duration", type=float, default=60,
+        help="Collection duration in seconds (0 = infinite, default: 60)"
+    )
+    parser.add_argument(
+        "--interval", type=float, default=0.5,
+        help="Sampling interval in seconds (default: 0.5)"
+    )
+    parser.add_argument(
+        "--output", "-o", type=str, default="benchmark/results/metrics.csv",
+        help="Output CSV file path"
+    )
+    parser.add_argument(
+        "--label", type=str, default="system",
+        help="Label for this run (e.g., 'NVP' or 'MVP')"
+    )
+    parser.add_argument(
+        "--pid", type=int, default=None,
+        help="Monitor a specific process by PID instead of system-wide"
+    )
+
+    args = parser.parse_args()
+
+    if args.pid:
+        collect_process_metrics(
+            pid=args.pid,
+            duration=args.duration,
+            interval=args.interval,
+            output_path=args.output,
+            label=args.label,
+        )
+    else:
+        collect_system_metrics(
+            duration=args.duration,
+            interval=args.interval,
+            output_path=args.output,
+            label=args.label,
+        )
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+File: benchmark\traffic_replay.sh
+================================================================================
+
+#!/bin/bash
+# ==============================================================
+# NIDS Benchmark — Traffic Replay Script
+#
+# Replays a PCAP file against both NVP and MVP systems using tcpreplay.
+# This ensures both systems process IDENTICAL traffic for a fair comparison.
+#
+# Prerequisites:
+#   sudo apt install tcpreplay
+#
+# Usage:
+#   ./benchmark/traffic_replay.sh <pcap_file> <interface> [pps_rate]
+#
+# Example:
+#   # Replay at 10,000 packets per second:
+#   ./benchmark/traffic_replay.sh captures/test_traffic.pcap eth0 10000
+#
+#   # Replay at maximum speed:
+#   ./benchmark/traffic_replay.sh captures/test_traffic.pcap eth0 0
+# ==============================================================
+
+set -euo pipefail
+
+# ── Arguments ─────────────────────────────────────────────────
+PCAP_FILE="${1:-}"
+INTERFACE="${2:-eth0}"
+PPS_RATE="${3:-10000}"   # Packets per second (0 = max speed)
+
+if [ -z "$PCAP_FILE" ]; then
+    echo ""
+    echo "  NIDS Benchmark — Traffic Replay"
+    echo "  ────────────────────────────────────────────"
+    echo ""
+    echo "  Usage: $0 <pcap_file> [interface] [pps_rate]"
+    echo ""
+    echo "  Arguments:"
+    echo "    pcap_file    Path to the PCAP file to replay"
+    echo "    interface    Network interface (default: eth0)"
+    echo "    pps_rate     Packets/sec rate (default: 10000, 0=max)"
+    echo ""
+    echo "  Example:"
+    echo "    $0 captures/test.pcap eth0 10000"
+    echo ""
+    exit 1
+fi
+
+if [ ! -f "$PCAP_FILE" ]; then
+    echo "[✘] PCAP file not found: $PCAP_FILE"
+    exit 1
+fi
+
+# ── Check Dependencies ───────────────────────────────────────
+if ! command -v tcpreplay &> /dev/null; then
+    echo "[✘] tcpreplay not installed. Run: sudo apt install tcpreplay"
+    exit 1
+fi
+
+# ── PCAP Info ─────────────────────────────────────────────────
+echo ""
+echo "  ══════════════════════════════════════════════════"
+echo "  NIDS BENCHMARK — Traffic Replay"
+echo "  ══════════════════════════════════════════════════"
+echo "  PCAP:        $PCAP_FILE"
+echo "  Interface:   $INTERFACE"
+echo "  PPS Rate:    ${PPS_RATE} pps"
+echo ""
+
+# Show PCAP stats
+if command -v capinfos &> /dev/null; then
+    echo "  ── PCAP Statistics ──"
+    capinfos -c -s -u "$PCAP_FILE" 2>/dev/null | tail -5 | sed 's/^/  /'
+    echo ""
+fi
+
+echo "  Starting replay in 3 seconds..."
+sleep 3
+
+# ── Replay ────────────────────────────────────────────────────
+echo ""
+echo "  [*] Replaying traffic..."
+echo ""
+
+if [ "$PPS_RATE" -eq 0 ] 2>/dev/null; then
+    # Maximum speed replay
+    sudo tcpreplay \
+        --intf1="$INTERFACE" \
+        --topspeed \
+        --stats=5 \
+        "$PCAP_FILE"
+else
+    # Rate-limited replay
+    sudo tcpreplay \
+        --intf1="$INTERFACE" \
+        --pps="$PPS_RATE" \
+        --stats=5 \
+        "$PCAP_FILE"
+fi
+
+echo ""
+echo "  [✔] Replay complete."
+echo ""
+
+
+================================================================================
+File: infrastructure\docker-compose.yml
+================================================================================
+
+# ==============================================================
+# NIDS MVP — Docker Compose Orchestration
+#
+# Services:
+#   1. ebpf-listener: eBPF/XDP data plane + ML inference
+#   2. api:           FastAPI backend for external consumption
+#
+# Requirements:
+#   - Docker Engine with Linux containers
+#   - Host must have Linux kernel >= 4.15 for XDP support
+#   - Run with: docker-compose up --build
+#
+# Note: The eBPF container requires privileged mode and host
+#       network access to attach XDP programs to the NIC.
+# ==============================================================
+
+version: "3.8"
+
+services:
+  # ── eBPF Data Plane Listener ──────────────────────────────────
+  ebpf-listener:
+    build:
+      context: ..
+      dockerfile: infrastructure/Dockerfile.ebpf
+    container_name: nids-ebpf
+    privileged: true        # Required for BPF syscalls
+    network_mode: host      # Required for raw NIC access
+    cap_add:
+      - SYS_ADMIN           # Required for bpf() syscall
+      - NET_ADMIN            # Required for XDP attach
+    volumes:
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+      - /lib/modules:/lib/modules:ro
+      - /usr/src:/usr/src:ro
+      - ../isolation_forest_model.pkl:/app/isolation_forest_model.pkl:ro
+      - ../scaler.pkl:/app/scaler.pkl:ro
+      - ../top_features.pkl:/app/top_features.pkl:ro
+      - ../optimal_threshold.pkl:/app/optimal_threshold.pkl:ro
+    environment:
+      - NIDS_INTERFACE=eth0
+      - NIDS_API_URL=http://localhost:8000
+    restart: unless-stopped
+    command: >
+      python -m src.ebpf.user_space
+      --interface ${NIDS_INTERFACE:-eth0}
+      --artifacts-dir /app
+      --api http://localhost:8000
+
+  # ── FastAPI Backend ───────────────────────────────────────────
+  api:
+    build:
+      context: ..
+      dockerfile: infrastructure/Dockerfile.api
+    container_name: nids-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../isolation_forest_model.pkl:/app/isolation_forest_model.pkl:ro
+      - ../scaler.pkl:/app/scaler.pkl:ro
+      - ../top_features.pkl:/app/top_features.pkl:ro
+      - ../optimal_threshold.pkl:/app/optimal_threshold.pkl:ro
+    environment:
+      - NIDS_ARTIFACTS_DIR=/app
+    restart: unless-stopped
+    command: >
+      python -m src.api.server
+      --host 0.0.0.0
+      --port 8000
+      --artifacts-dir /app
+
+
+================================================================================
+File: infrastructure\Dockerfile.api
+================================================================================
+
+# FastAPI Backend Dockerfile — lightweight Python image
+FROM python:3.10-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/ ./src/
+
+EXPOSE 8000
+
+CMD ["python", "-m", "src.api.server", "--host", "0.0.0.0", "--port", "8000"]
+
+
+================================================================================
+File: infrastructure\Dockerfile.ebpf
+================================================================================
+
+# eBPF Listener Dockerfile — requires BCC and kernel headers
+FROM python:3.10-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bpfcc-tools \
+    python3-bpfcc \
+    libbpf-dev \
+    linux-headers-generic \
+    clang \
+    llvm \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/ ./src/
+
+CMD ["python", "-m", "src.ebpf.user_space", "--interface", "eth0"]
+
+
+================================================================================
+File: src\__init__.py
+================================================================================
+
+# src package init
+
+
+================================================================================
+File: src\api\server.py
+================================================================================
+
+"""
+NIDS MVP — FastAPI Backend Server
+
+Clean, production-grade API for the MVP architecture.
+Replaces the legacy main.py and backend/app.py with a unified server.
+
+Endpoints:
+    GET  /health         — System status and readiness check
+    POST /analyze        — Analyze a 10-feature flow vector
+    GET  /alerts         — Retrieve recent alerts with optional level filter
+    GET  /alerts/stats   — Aggregated alert statistics
+    POST /explain        — Full SHAP + NLG explanation for a flow
+
+Author: NIDS Research Team
+"""
+
+import sys
+import time
+import logging
+from pathlib import Path
+from typing import Dict, Optional, List
+from contextlib import asynccontextmanager
+from collections import deque
+import threading
+import joblib
+
+import numpy as np
+import uvicorn
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field
+
+# Ensure project root is in path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from src.xai.explainer import NIDSExplainer
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+)
+logger = logging.getLogger("nids.api")
+
+# ---------------------------------------------------------------------------
+# Global Instances
+# ---------------------------------------------------------------------------
+
+scaler = None
+explainer: Optional[NIDSExplainer] = None
+_alert_log: deque = deque(maxlen=100000)
+_log_lock = threading.Lock()
+
+ARTIFACTS_DIR = "."  # Override via environment or CLI
+
+
+# ---------------------------------------------------------------------------
+# Lifespan (Startup / Shutdown)
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize SHAP explainer on startup."""
+    global scaler, explainer
+
+    logger.info("=" * 60)
+    logger.info("NIDS MVP API — Starting Up")
+    logger.info("=" * 60)
+
+    try:
+        scaler = joblib.load(str(Path(ARTIFACTS_DIR) / "scaler.pkl"))
+        explainer = NIDSExplainer.from_artifacts(ARTIFACTS_DIR)
+        logger.info("[✔] API ready to serve explanations and store alerts.")
+    except FileNotFoundError as e:
+        logger.error(f"Failed to load model artifacts: {e}")
+        logger.error("Run 'python -m src.ml.train_baseline' first.")
+        raise
+
+
+    yield
+
+    logger.info("NIDS MVP API — Shutting Down")
+
+
+# ---------------------------------------------------------------------------
+# FastAPI App
+# ---------------------------------------------------------------------------
+
+app = FastAPI(
+    title="AI-Driven NIDS — MVP Inference Engine",
+    description=(
+        "Explainable AI-Driven Lightweight Network Intrusion Detection System. "
+        "Uses eBPF for data plane, cost-sensitive Isolation Forest for detection, "
+        "and SHAP with NLG for explainability."
+    ),
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
+
+# ---------------------------------------------------------------------------
+# Request / Response Models (Pydantic)
+# ---------------------------------------------------------------------------
+
+class FlowInput(BaseModel):
+    """Input model for flow analysis."""
+    features: Dict[str, float] = Field(
+        ...,
+        description="Dictionary of 10 flow features matching the UNSW-NB15 feature set.",
+        json_schema_extra={
+            "example": {
+                "MIN_TTL": 64.0,
+                "MAX_TTL": 64.0,
+                "SHORTEST_FLOW_PKT": 54.0,
+                "LONGEST_FLOW_PKT": 1500.0,
+                "MIN_IP_PKT_LEN": 40.0,
+                "MAX_IP_PKT_LEN": 1480.0,
+                "OUT_BYTES": 2500.0,
+                "OUT_PKTS": 15.0,
+                "DST_TO_SRC_SECOND_BYTES": 45000.0,
+                "NUM_PKTS_UP_TO_128_BYTES": 8.0,
+            }
+        }
+    )
+
+class DetectionResultInput(BaseModel):
+    """Pre-computed detection result from eBPF Data Plane."""
+    timestamp: float
+    anomaly_score: float
+    threshold: float
+    is_anomaly: bool
+    alert_level: str
+    features: Dict[str, float]
+    spike_info: Optional[Dict] = None
+
+
+
+class HealthResponse(BaseModel):
+    status: str
+    model_loaded: bool
+    features_count: int
+    threshold: float
+    uptime_seconds: float
+
+
+# ---------------------------------------------------------------------------
+# API Endpoints
+# ---------------------------------------------------------------------------
+
+_start_time = time.time()
+
+
+@app.get("/health", response_model=HealthResponse)
+def health_check():
+    """System status and model readiness check."""
+    return HealthResponse(
+        status="online" if explainer else "degraded",
+        model_loaded=True if explainer else False,
+        features_count=len(explainer.feature_names) if explainer else 0,
+        threshold=0.0,
+        uptime_seconds=round(time.time() - _start_time, 1),
+    )
+
+
+@app.post("/analyze")
+def analyze_flow(data: DetectionResultInput):
+    """
+    Receive pre-computed network anomaly detection events from the eBPF data plane.
+    """
+    try:
+        with _log_lock:
+            _alert_log.append(data.model_dump())
+        return {"status": "Event logged successfully"}
+    except Exception as e:
+        logger.error(f"Failed to log event: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Storage error: {str(e)}")
+
+
+@app.post("/explain")
+def explain_flow(data: FlowInput):
+    """
+    Full SHAP + NLG explanation for a network flow.
+
+    Returns ranked feature attributions with human-readable insights
+    and MITRE ATT&CK technique mappings.
+    """
+    if not explainer or not scaler:
+        raise HTTPException(
+            status_code=503,
+            detail="Explainer or scaler not initialized."
+        )
+
+    missing = [f for f in explainer.feature_names if f not in data.features]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required features: {missing}"
+        )
+
+    try:
+        feature_vector = np.array(
+            [data.features[f] for f in explainer.feature_names],
+            dtype=np.float64
+        )
+
+        # Scale for SHAP
+        X_scaled = scaler.transform(np.atleast_2d(feature_vector))
+
+        # Get full explanation report
+        report = explainer.explain(
+            X_scaled,
+            feature_values=data.features,
+            top_k=10
+        )
+
+        return {
+            "explanation": report.to_dict(),
+        }
+
+    except Exception as e:
+        logger.error(f"Explanation error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Explanation error: {str(e)}")
+
+
+@app.get("/alerts")
+def get_alerts(
+    n: int = Query(50, description="Number of recent alerts to retrieve"),
+    level: Optional[str] = Query(None, description="Filter by alert level: NORMAL, WARNING, CRITICAL")
+):
+    """Retrieve recent alerts with optional level filtering."""
+    with _log_lock:
+        alerts = list(_alert_log)[-n:]
+    if level:
+        alerts = [a for a in alerts if a["alert_level"] == level]
+    return {
+        "count": len(alerts),
+        "alerts": alerts,
+    }
+
+
+@app.get("/alerts/stats")
+def get_alert_stats():
+    """Aggregated alert statistics."""
+    with _log_lock:
+        all_alerts = list(_alert_log)
+    total = len(all_alerts)
+
+    if total == 0:
+        return {"total": 0, "by_level": {}, "anomaly_rate": 0.0}
+
+    by_level = {}
+    for alert in all_alerts:
+        lvl = alert["alert_level"]
+        by_level[lvl] = by_level.get(lvl, 0) + 1
+
+    anomaly_count = by_level.get("WARNING", 0) + by_level.get("CRITICAL", 0)
+
+    return {
+        "total": total,
+        "by_level": by_level,
+        "anomaly_rate": round(anomaly_count / total, 4),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Server Entry Point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="NIDS MVP API Server")
+    parser.add_argument("--host", default="0.0.0.0", help="Bind address")
+    parser.add_argument("--port", type=int, default=8000, help="Bind port")
+    parser.add_argument("--artifacts-dir", default=".", help="Model artifacts directory")
+    parser.add_argument("--reload", action="store_true", help="Enable auto-reload")
+
+    args = parser.parse_args()
+    ARTIFACTS_DIR = args.artifacts_dir
+
+    uvicorn.run(
+        "src.api.server:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+    )
+
+
+================================================================================
+File: src\api\__init__.py
+================================================================================
+
+# src.api package init
+
+
+================================================================================
+File: src\ebpf\flow_tracker.c
+================================================================================
+
+/*
+ * eBPF/XDP Flow Tracker — Kernel-Space Packet Parsing & Flow Aggregation
+ *
+ * This program hooks at the XDP (eXpress Data Path) layer — the earliest
+ * possible packet interception point in the Linux kernel, BEFORE sk_buff
+ * allocation. This eliminates the user-space copy overhead that cripples
+ * Scapy-based NIDS implementations.
+ *
+ * Architecture:
+ *   1. XDP hook parses Ethernet → IP → TCP/UDP headers
+ *   2. Extracts 5-tuple flow key (src_ip, dst_ip, src_port, dst_port, proto)
+ *   3. Maintains per-flow statistics in a BPF Hash Map
+ *   4. When flows hit packet threshold or timeout, exports stats to user-space
+ *      via a Perf Event Array
+ *
+ * The 10 features extracted here match the UNSW-NB15 feature set exactly:
+ *   MIN_TTL, MAX_TTL, SHORTEST_FLOW_PKT, LONGEST_FLOW_PKT,
+ *   MIN_IP_PKT_LEN, MAX_IP_PKT_LEN, OUT_BYTES, OUT_PKTS,
+ *   DST_TO_SRC_SECOND_BYTES, NUM_PKTS_UP_TO_128_BYTES
+ *
+ * Compile (standalone):
+ *   clang -O2 -target bpf -c flow_tracker.c -o flow_tracker.o
+ *
+ * Note: When used with BCC (Python), BCC compiles this inline — no manual
+ *       compilation needed. The standalone compile is for libbpf deployments.
+ *
+ * LIMITATION (Fragmented Packet Attacks):
+ *   XDP operates before the kernel's network stack can reassemble IP fragments.
+ *   Consequently, this flow tracker processes each fragment as an independent
+ *   packet. An attacker could exploit this by sending fragmented malicious
+ *   vectors (e.g., 1500-byte attack split into 64-byte fragments), causing
+ *   the ML model to classify them as "innocent small packets". IP 
+ *   de-fragmentation is not supported at the XDP level and remains a known
+ *   blind spot for future research (Limitations section of thesis).
+ *
+ * Author: NIDS Research Team
+ * License: GPL-2.0 (required for eBPF programs)
+ */
+
+#include <linux/bpf.h>
+#include <linux/if_ether.h>
+#include <linux/ip.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
+#include <linux/in.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_endian.h>
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Constants
+ * ───────────────────────────────────────────────────────────────────────── */
+
+#define MAX_FLOWS          65536   /* Maximum concurrent tracked flows      */
+#define FLOW_PKT_THRESHOLD 20     /* Export flow after N packets            */
+#define FLOW_TIMEOUT_NS    5000000000ULL  /* 5 seconds in nanoseconds      */
+#define SMALL_PKT_CUTOFF   128    /* Packets <= this are "small"            */
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Data Structures
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/*
+ * 5-tuple flow key for bidirectional flow identification.
+ * IPs and ports are sorted to ensure bidirectional matching:
+ *   (A→B) and (B→A) produce the same key.
+ */
+struct flow_key {
+    __u32 ip_lo;       /* Lower IP address (network byte order)   */
+    __u32 ip_hi;       /* Higher IP address (network byte order)  */
+    __u16 port_lo;     /* Lower port number                       */
+    __u16 port_hi;     /* Higher port number                      */
+    __u8  protocol;    /* IP protocol (TCP=6, UDP=17)             */
+    __u8  pad[3];      /* Alignment padding                       */
+};
+
+/*
+ * Per-flow state maintained in the BPF hash map.
+ * These fields directly compute our 10 ML features.
+ */
+struct flow_state {
+    /* Timing */
+    __u64 first_seen_ns;       /* Timestamp of first packet (ktime)       */
+    __u64 last_seen_ns;        /* Timestamp of most recent packet         */
+
+    /* Feature: MIN_TTL, MAX_TTL */
+    __u8  min_ttl;
+    __u8  max_ttl;
+
+    /* Feature: SHORTEST_FLOW_PKT, LONGEST_FLOW_PKT (raw Ethernet frame) */
+    __u16 min_pkt_len;
+    __u16 max_pkt_len;
+
+    /* Feature: MIN_IP_PKT_LEN, MAX_IP_PKT_LEN (IP total length) */
+    __u16 min_ip_pkt_len;
+    __u16 max_ip_pkt_len;
+
+    /* Feature: OUT_BYTES, OUT_PKTS (initiator → destination) */
+    __u64 out_bytes;
+    __u32 out_pkts;
+
+    /* Feature: DST_TO_SRC_SECOND_BYTES (reverse direction) */
+    __u64 dst_to_src_bytes;
+
+    /* Feature: NUM_PKTS_UP_TO_128_BYTES */
+    __u32 pkts_up_to_128;
+
+    /* Bookkeeping */
+    __u32 total_pkts;          /* Total packet count in this flow         */
+    __u32 initiator_ip;        /* IP of the flow initiator (first pkt src)*/
+};
+
+/*
+ * Exported flow record — sent to user-space via perf event.
+ * Contains the final computed 10-feature vector.
+ */
+struct flow_export {
+    /* Flow identification */
+    struct flow_key key;
+
+    /* The 10 ML features (matching UNSW-NB15 column order) */
+    __u32 min_ttl;                   /* 1. MIN_TTL                     */
+    __u32 max_ttl;                   /* 2. MAX_TTL                     */
+    __u32 shortest_flow_pkt;         /* 3. SHORTEST_FLOW_PKT           */
+    __u32 longest_flow_pkt;          /* 4. LONGEST_FLOW_PKT            */
+    __u32 min_ip_pkt_len;            /* 5. MIN_IP_PKT_LEN              */
+    __u32 max_ip_pkt_len;            /* 6. MAX_IP_PKT_LEN              */
+    __u64 out_bytes;                 /* 7. OUT_BYTES                   */
+    __u32 out_pkts;                  /* 8. OUT_PKTS                    */
+    __u64 dst_to_src_second_bytes;   /* 9. DST_TO_SRC_SECOND_BYTES     */
+    __u32 num_pkts_up_to_128;        /* 10. NUM_PKTS_UP_TO_128_BYTES   */
+
+    /* Metadata */
+    __u32 total_pkts;
+    __u64 flow_duration_ns;
+};
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * BPF Maps
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/* Hash map: flow_key → flow_state */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, MAX_FLOWS);
+    __type(key, struct flow_key);
+    __type(value, struct flow_state);
+} flow_table SEC(".maps");
+
+/* Perf event array for exporting completed flows to user-space */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u32));
+} flow_events SEC(".maps");
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Helper Functions
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/*
+ * Construct a bidirectional flow key by sorting IPs and ports.
+ * This ensures (A→B) and (B→A) map to the same flow entry.
+ */
+static __always_inline void
+make_flow_key(struct flow_key *fk, __u32 src_ip, __u32 dst_ip,
+              __u16 src_port, __u16 dst_port, __u8 proto)
+{
+    if (src_ip < dst_ip || (src_ip == dst_ip && src_port <= dst_port)) {
+        fk->ip_lo   = src_ip;
+        fk->ip_hi   = dst_ip;
+        fk->port_lo = src_port;
+        fk->port_hi = dst_port;
+    } else {
+        fk->ip_lo   = dst_ip;
+        fk->ip_hi   = src_ip;
+        fk->port_lo = dst_port;
+        fk->port_hi = src_port;
+    }
+    fk->protocol = proto;
+    fk->pad[0] = fk->pad[1] = fk->pad[2] = 0;
+}
+
+/*
+ * Export a completed flow's statistics to user-space and delete from map.
+ */
+static __always_inline void
+export_flow(void *ctx, struct flow_key *fk, struct flow_state *fs)
+{
+    struct flow_export evt = {};
+
+    /* Copy flow key */
+    __builtin_memcpy(&evt.key, fk, sizeof(struct flow_key));
+
+    /* Map internal state → 10-feature export format */
+    evt.min_ttl              = (__u32)fs->min_ttl;
+    evt.max_ttl              = (__u32)fs->max_ttl;
+    evt.shortest_flow_pkt    = (__u32)fs->min_pkt_len;
+    evt.longest_flow_pkt     = (__u32)fs->max_pkt_len;
+    evt.min_ip_pkt_len       = (__u32)fs->min_ip_pkt_len;
+    evt.max_ip_pkt_len       = (__u32)fs->max_ip_pkt_len;
+    evt.out_bytes            = fs->out_bytes;
+    evt.out_pkts             = fs->out_pkts;
+    evt.dst_to_src_second_bytes = fs->dst_to_src_bytes;
+    evt.num_pkts_up_to_128   = fs->pkts_up_to_128;
+
+    /* Metadata */
+    evt.total_pkts      = fs->total_pkts;
+    evt.flow_duration_ns = fs->last_seen_ns - fs->first_seen_ns;
+
+    /* Submit to user-space via perf event ring buffer */
+    bpf_perf_event_output(ctx, &flow_events, BPF_F_CURRENT_CPU,
+                          &evt, sizeof(evt));
+
+    /* Remove the flow from the hash table */
+    bpf_map_delete_elem(&flow_table, fk);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * XDP Program Entry Point
+ * ───────────────────────────────────────────────────────────────────────── */
+
+SEC("xdp")
+int xdp_flow_tracker(struct xdp_md *ctx)
+{
+    /* Packet boundaries */
+    void *data     = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+
+    /* ── Layer 2: Ethernet ────────────────────────────────────────────── */
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return XDP_PASS;
+
+    /* Only process IPv4 */
+    if (eth->h_proto != bpf_htons(ETH_P_IP))
+        return XDP_PASS;
+
+    /* ── Layer 3: IP ──────────────────────────────────────────────────── */
+    struct iphdr *iph = (void *)(eth + 1);
+    if ((void *)(iph + 1) > data_end)
+        return XDP_PASS;
+
+    /* Validate IP header length */
+    __u32 ip_hdr_len = iph->ihl * 4;
+    if (ip_hdr_len < sizeof(struct iphdr))
+        return XDP_PASS;
+    if ((void *)iph + ip_hdr_len > data_end)
+        return XDP_PASS;
+
+    __u32 src_ip   = iph->saddr;
+    __u32 dst_ip   = iph->daddr;
+    __u8  proto    = iph->protocol;
+    __u8  ttl      = iph->ttl;
+    __u16 ip_len   = bpf_ntohs(iph->tot_len);
+
+    /* Total frame length (L2 + L3 + L4 + payload) */
+    __u32 pkt_len  = (__u32)(data_end - data);
+
+    /* ── Layer 4: TCP / UDP port extraction ───────────────────────────── */
+    __u16 src_port = 0;
+    __u16 dst_port = 0;
+
+    if (proto == IPPROTO_TCP) {
+        struct tcphdr *tcph = (void *)iph + ip_hdr_len;
+        if ((void *)(tcph + 1) > data_end)
+            return XDP_PASS;
+        src_port = bpf_ntohs(tcph->source);
+        dst_port = bpf_ntohs(tcph->dest);
+    } else if (proto == IPPROTO_UDP) {
+        struct udphdr *udph = (void *)iph + ip_hdr_len;
+        if ((void *)(udph + 1) > data_end)
+            return XDP_PASS;
+        src_port = bpf_ntohs(udph->source);
+        dst_port = bpf_ntohs(udph->dest);
+    } else {
+        /* Skip non-TCP/UDP traffic (ICMP, etc.) */
+        return XDP_PASS;
+    }
+
+    /* ── Build bidirectional flow key ─────────────────────────────────── */
+    struct flow_key fk = {};
+    make_flow_key(&fk, src_ip, dst_ip, src_port, dst_port, proto);
+
+    __u64 now = bpf_ktime_get_ns();
+
+    /* ── Flow state lookup / creation ─────────────────────────────────── */
+    struct flow_state *fs = bpf_map_lookup_elem(&flow_table, &fk);
+
+    if (!fs) {
+        /* New flow: initialize state */
+        struct flow_state new_fs = {};
+
+        new_fs.first_seen_ns  = now;
+        new_fs.last_seen_ns   = now;
+        new_fs.min_ttl        = ttl;
+        new_fs.max_ttl        = ttl;
+        new_fs.min_pkt_len    = (__u16)pkt_len;
+        new_fs.max_pkt_len    = (__u16)pkt_len;
+        new_fs.min_ip_pkt_len = ip_len;
+        new_fs.max_ip_pkt_len = ip_len;
+        new_fs.total_pkts     = 1;
+        new_fs.initiator_ip   = src_ip;
+
+        /* First packet is always "outbound" (initiator → destination) */
+        new_fs.out_bytes = pkt_len;
+        new_fs.out_pkts  = 1;
+        new_fs.dst_to_src_bytes = 0;
+
+        /* Small packet counter */
+        if (pkt_len <= SMALL_PKT_CUTOFF)
+            new_fs.pkts_up_to_128 = 1;
+
+        bpf_map_update_elem(&flow_table, &fk, &new_fs, BPF_ANY);
+        return XDP_PASS;
+    }
+
+    /* ── Update existing flow state ───────────────────────────────────── */
+
+    fs->last_seen_ns = now;
+    fs->total_pkts  += 1;
+
+    /* TTL min/max */
+    if (ttl < fs->min_ttl) fs->min_ttl = ttl;
+    if (ttl > fs->max_ttl) fs->max_ttl = ttl;
+
+    /* Packet length min/max (raw frame) */
+    if ((__u16)pkt_len < fs->min_pkt_len) fs->min_pkt_len = (__u16)pkt_len;
+    if ((__u16)pkt_len > fs->max_pkt_len) fs->max_pkt_len = (__u16)pkt_len;
+
+    /* IP packet length min/max */
+    if (ip_len < fs->min_ip_pkt_len) fs->min_ip_pkt_len = ip_len;
+    if (ip_len > fs->max_ip_pkt_len) fs->max_ip_pkt_len = ip_len;
+
+    /* Directional byte/packet counters */
+    if (src_ip == fs->initiator_ip) {
+        fs->out_bytes += pkt_len;
+        fs->out_pkts  += 1;
+    } else {
+        fs->dst_to_src_bytes += pkt_len;
+    }
+
+    /* Small packet counter */
+    if (pkt_len <= SMALL_PKT_CUTOFF)
+        fs->pkts_up_to_128 += 1;
+
+    /* ── Check export conditions ──────────────────────────────────────── */
+    __u64 duration = now - fs->first_seen_ns;
+
+    if (fs->total_pkts >= FLOW_PKT_THRESHOLD ||
+        duration >= FLOW_TIMEOUT_NS) {
+        export_flow(ctx, &fk, fs);
+    }
+
+    /* XDP_PASS: Let the packet continue through the network stack.
+     * We are a PASSIVE monitor — never drop or modify traffic. */
+    return XDP_PASS;
+}
+
+/* GPL license is REQUIRED for eBPF programs using kernel helpers */
+char _license[] SEC("license") = "GPL";
+
+
+================================================================================
+File: src\ebpf\user_space.py
+================================================================================
+
+"""
+eBPF User-Space Listener — BCC Python Bridge
+
+This daemon attaches the eBPF/XDP program to the network interface,
+polls the perf event ring buffer for completed flow records, and
+converts C struct data into numpy arrays matching the 10-feature
+UNSW-NB15 format for the ML engine.
+
+Architecture:
+    ┌──────────────┐     perf event     ┌───────────────┐     numpy      ┌──────────┐
+    │  XDP Kernel  │ ──────────────────→ │  user_space   │ ────────────→ │ ML Engine│
+    │  (C/eBPF)    │    flow_export      │  (Python/BCC) │   10-feature  │          │
+    └──────────────┘                     └───────────────┘    array       └──────────┘
+
+Requirements:
+    - Linux kernel ≥ 4.15 (XDP support)
+    - BCC (apt install bpfcc-tools python3-bpfcc)
+    - Root/CAP_NET_ADMIN privileges
+
+Usage:
+    sudo python -m src.ebpf.user_space --interface eth0
+    sudo python -m src.ebpf.user_space --interface eth0 --api http://localhost:8000
+
+Author: NIDS Research Team
+"""
+
+import sys
+import os
+import time
+import json
+import struct
+import signal
+import logging
+import argparse
+import ctypes as ct
+from pathlib import Path
+from typing import Optional, Callable
+import threading
+import queue
+
+# Fix Windows terminal encoding
+if sys.platform == "win32":
+    os.system("")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+import numpy as np
+
+# BCC import — only available on Linux with BCC installed
+try:
+    from bcc import BPF
+    BCC_AVAILABLE = True
+except ImportError:
+    BCC_AVAILABLE = False
+
+# Ensure project root is in path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from src.ml.engine import NIDSEngine, CANONICAL_FEATURES
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+)
+logger = logging.getLogger("nids.ebpf")
+
+
+# ---------------------------------------------------------------------------
+# C Struct Definitions (must mirror flow_tracker.c exactly)
+# ---------------------------------------------------------------------------
+
+class FlowKey(ct.Structure):
+    """Mirrors `struct flow_key` from flow_tracker.c"""
+    _fields_ = [
+        ("ip_lo",    ct.c_uint32),
+        ("ip_hi",    ct.c_uint32),
+        ("port_lo",  ct.c_uint16),
+        ("port_hi",  ct.c_uint16),
+        ("protocol", ct.c_uint8),
+        ("pad",      ct.c_uint8 * 3),
+    ]
+
+
+class FlowExport(ct.Structure):
+    """Mirrors `struct flow_export` from flow_tracker.c"""
+    _fields_ = [
+        # Flow key
+        ("key", FlowKey),
+
+        # 10 ML features
+        ("min_ttl",                  ct.c_uint32),
+        ("max_ttl",                  ct.c_uint32),
+        ("shortest_flow_pkt",        ct.c_uint32),
+        ("longest_flow_pkt",         ct.c_uint32),
+        ("min_ip_pkt_len",           ct.c_uint32),
+        ("max_ip_pkt_len",           ct.c_uint32),
+        ("out_bytes",                ct.c_uint64),
+        ("out_pkts",                 ct.c_uint32),
+        ("dst_to_src_second_bytes",  ct.c_uint64),
+        ("num_pkts_up_to_128",       ct.c_uint32),
+
+        # Metadata
+        ("total_pkts",               ct.c_uint32),
+        ("flow_duration_ns",         ct.c_uint64),
+    ]
+
+
+def ip_to_str(ip_int: int) -> str:
+    """Convert a network-byte-order u32 IP to dotted-quad string."""
+    return f"{ip_int & 0xFF}.{(ip_int >> 8) & 0xFF}.{(ip_int >> 16) & 0xFF}.{(ip_int >> 24) & 0xFF}"
+
+
+def proto_to_str(proto: int) -> str:
+    """Convert IP protocol number to name."""
+    return {6: "TCP", 17: "UDP"}.get(proto, f"PROTO_{proto}")
+
+
+# ---------------------------------------------------------------------------
+# Flow Event Handler
+# ---------------------------------------------------------------------------
+
+class FlowProcessor:
+    """
+    Receives flow export events from eBPF and processes them through the
+    ML engine for real-time anomaly detection.
+    """
+
+    def __init__(self, engine: NIDSEngine, api_url: Optional[str] = None):
+        self.engine = engine
+        self.api_url = api_url
+        self.flows_processed = 0
+        self.anomalies_detected = 0
+
+        # Queued background worker for Fast API forwarding
+        if api_url:
+            self._queue = queue.Queue(maxsize=100000)
+            self._api_worker = threading.Thread(target=self._worker_loop, daemon=True)
+            self._api_worker.start()
+        else:
+            self._queue = None
+
+    def _worker_loop(self):
+        try:
+            import requests
+            session = requests.Session()
+            session.headers.update({"Content-Type": "application/json"})
+        except ImportError:
+            logger.warning("requests library not available. API forwarding disabled.")
+            return
+
+        while True:
+            try:
+                payload = self._queue.get()
+                session.post(
+                    f"{self.api_url}/analyze",
+                    json=payload,
+                    timeout=2,
+                )
+                self._queue.task_done()
+            except Exception:
+                # Silently ignore network errors to keep loop alive
+                pass
+
+    def flow_to_numpy(self, event: FlowExport) -> np.ndarray:
+        """
+        Convert a C struct FlowExport to a numpy array in CANONICAL_FEATURES order.
+
+        The order MUST match the training pipeline's feature column order.
+        """
+        return np.array([
+            float(event.min_ttl),                  # MIN_TTL
+            float(event.max_ttl),                  # MAX_TTL
+            float(event.shortest_flow_pkt),        # SHORTEST_FLOW_PKT
+            float(event.longest_flow_pkt),         # LONGEST_FLOW_PKT
+            float(event.min_ip_pkt_len),           # MIN_IP_PKT_LEN
+            float(event.max_ip_pkt_len),           # MAX_IP_PKT_LEN
+            float(event.out_bytes),                # OUT_BYTES
+            float(event.out_pkts),                 # OUT_PKTS
+            float(event.dst_to_src_second_bytes),  # DST_TO_SRC_SECOND_BYTES
+            float(event.num_pkts_up_to_128),       # NUM_PKTS_UP_TO_128_BYTES
+        ], dtype=np.float64)
+
+    def flow_to_dict(self, event: FlowExport) -> dict:
+        """Convert flow export to a feature dictionary."""
+        return {
+            "MIN_TTL": float(event.min_ttl),
+            "MAX_TTL": float(event.max_ttl),
+            "SHORTEST_FLOW_PKT": float(event.shortest_flow_pkt),
+            "LONGEST_FLOW_PKT": float(event.longest_flow_pkt),
+            "MIN_IP_PKT_LEN": float(event.min_ip_pkt_len),
+            "MAX_IP_PKT_LEN": float(event.max_ip_pkt_len),
+            "OUT_BYTES": float(event.out_bytes),
+            "OUT_PKTS": float(event.out_pkts),
+            "DST_TO_SRC_SECOND_BYTES": float(event.dst_to_src_second_bytes),
+            "NUM_PKTS_UP_TO_128_BYTES": float(event.num_pkts_up_to_128),
+        }
+
+    def handle_event(self, cpu: int, data: ct.c_void_p, size: int):
+        """
+        BCC perf event callback. Called for each completed flow.
+
+        Args:
+            cpu: CPU core that generated the event.
+            data: Pointer to raw event data.
+            size: Size of the event data.
+        """
+        event = ct.cast(data, ct.POINTER(FlowExport)).contents
+
+        # Convert to numpy and feature dict
+        feature_vector = self.flow_to_numpy(event)
+        feature_dict = self.flow_to_dict(event)
+
+        # Run ML inference
+        result = self.engine.analyze(feature_vector, feature_dict=feature_dict)
+        self.flows_processed += 1
+
+        # Format flow identification
+        flow_id = (
+            f"{ip_to_str(event.key.ip_lo)}:{event.key.port_lo} ↔ "
+            f"{ip_to_str(event.key.ip_hi)}:{event.key.port_hi} "
+            f"({proto_to_str(event.key.protocol)})"
+        )
+        duration_ms = event.flow_duration_ns / 1_000_000
+
+        # Color-coded terminal output
+        if result.alert_level == "CRITICAL":
+            color = "\033[91m"  # Red
+            self.anomalies_detected += 1
+        elif result.alert_level == "WARNING":
+            color = "\033[93m"  # Yellow
+            self.anomalies_detected += 1
+        else:
+            color = "\033[92m"  # Green
+        reset = "\033[0m"
+
+        timestamp = time.strftime("%H:%M:%S")
+        print(
+            f"[{timestamp}] {color}{result.alert_level:8s}{reset} │ "
+            f"Score: {result.anomaly_score:+.4f} │ "
+            f"Pkts: {event.total_pkts:4d} │ "
+            f"Dur: {duration_ms:7.1f}ms │ "
+            f"{flow_id}"
+        )
+
+        # Forward to API via background thread
+        if self._queue is not None:
+            try:
+                self._queue.put_nowait(result.to_dict())
+            except queue.Full:
+                pass  # Drop payload if API is too slow, protecting eBPF memory
+
+    def print_stats(self):
+        """Print processing statistics."""
+        print(f"\n--- Session Statistics ---")
+        print(f"  Flows processed:   {self.flows_processed}")
+        print(f"  Anomalies found:   {self.anomalies_detected}")
+        if self.flows_processed > 0:
+            rate = self.anomalies_detected / self.flows_processed * 100
+            print(f"  Anomaly rate:      {rate:.1f}%")
+
+
+# ---------------------------------------------------------------------------
+# eBPF Loader & Main Loop
+# ---------------------------------------------------------------------------
+
+# Inline BCC version of the eBPF C program
+# BCC compiles C at runtime — we read the .c file directly
+BPF_C_SOURCE_PATH = Path(__file__).parent / "flow_tracker.c"
+
+
+def load_bpf_program(interface: str) -> BPF:
+    """
+    Load and attach the eBPF/XDP program to the specified interface.
+
+    BCC compiles the C source at runtime and injects it into the kernel.
+    """
+    if not BCC_AVAILABLE:
+        raise RuntimeError(
+            "BCC (BPF Compiler Collection) is not installed. "
+            "Install with: sudo apt install bpfcc-tools python3-bpfcc"
+        )
+
+    # For BCC, we need to read the C source and adapt includes
+    c_source = BPF_C_SOURCE_PATH.read_text()
+
+    # BCC uses its own headers — replace standard libbpf includes
+    bcc_source = c_source.replace('#include <linux/bpf.h>', '')
+    bcc_source = bcc_source.replace('#include <bpf/bpf_helpers.h>', '')
+    bcc_source = bcc_source.replace('#include <bpf/bpf_endian.h>', '')
+    # BCC provides bpf_htons, bpf_ntohs as builtins
+
+    logger.info(f"Compiling eBPF program ({len(c_source)} bytes)...")
+    b = BPF(text=bcc_source)
+
+    # Attach XDP program to the interface
+    fn = b.load_func("xdp_flow_tracker", BPF.XDP)
+    b.attach_xdp(interface, fn, 0)
+    logger.info(f"XDP program attached to interface: {interface}")
+
+    return b
+
+
+def run_listener(interface: str, artifacts_dir: str = ".",
+                 api_url: Optional[str] = None):
+    """
+    Main event loop: attach eBPF, process flow events, run ML inference.
+
+    Args:
+        interface: Network interface to attach XDP program to (e.g., "eth0").
+        artifacts_dir: Path to model .pkl artifacts.
+        api_url: Optional FastAPI URL for forwarding results.
+    """
+    print("=" * 70)
+    print("  eBPF/XDP FLOW TRACKER — Real-Time Network Intrusion Detection")
+    print("=" * 70)
+    print(f"  Interface:     {interface}")
+    print(f"  Artifacts:     {artifacts_dir}")
+    print(f"  API Forward:   {api_url or 'Disabled'}")
+    print(f"  Press Ctrl+C to stop.")
+    print("=" * 70)
+    print()
+
+    # Initialize ML engine
+    engine = NIDSEngine(artifacts_dir=artifacts_dir)
+    engine.load_artifacts()
+
+    # Initialize flow processor
+    processor = FlowProcessor(engine=engine, api_url=api_url)
+
+    # Load and attach eBPF program
+    bpf = load_bpf_program(interface)
+
+    # Register the perf event callback
+    bpf["flow_events"].open_perf_buffer(processor.handle_event, page_cnt=64)
+
+    # Print table header
+    print(f"{'Time':^10s} │ {'Level':^8s} │ {'Score':^12s} │ "
+          f"{'Pkts':^6s} │ {'Duration':^10s} │ Flow")
+    print("─" * 90)
+
+    # Graceful shutdown handler
+    running = True
+
+    def signal_handler(sig, frame):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Main polling loop
+    try:
+        while running:
+            bpf.perf_buffer_poll(timeout=100)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # Detach XDP program
+        logger.info("Detaching XDP program...")
+        bpf.remove_xdp(interface, 0)
+        processor.print_stats()
+        print("\neBPF listener stopped cleanly.")
+
+
+# ---------------------------------------------------------------------------
+# Offline Mode (for testing on non-Linux / without eBPF)
+# ---------------------------------------------------------------------------
+
+def run_offline_test(artifacts_dir: str = "."):
+    """
+    Test the flow processing pipeline without eBPF.
+    Uses synthetic flow data for validation on Windows/macOS.
+    """
+    print("=" * 70)
+    print("  OFFLINE TEST MODE (No eBPF — synthetic flow data)")
+    print("=" * 70)
+    print()
+
+    engine = NIDSEngine(artifacts_dir=artifacts_dir)
+    engine.load_artifacts()
+
+    processor = FlowProcessor(engine=engine)
+
+    # Simulate some flows
+    test_flows = [
+        # Normal web browsing
+        {"MIN_TTL": 64, "MAX_TTL": 64, "SHORTEST_FLOW_PKT": 54,
+         "LONGEST_FLOW_PKT": 1500, "MIN_IP_PKT_LEN": 40,
+         "MAX_IP_PKT_LEN": 1480, "OUT_BYTES": 2500, "OUT_PKTS": 15,
+         "DST_TO_SRC_SECOND_BYTES": 45000, "NUM_PKTS_UP_TO_128_BYTES": 8},
+        # Suspicious: high outbound
+        {"MIN_TTL": 12, "MAX_TTL": 245, "SHORTEST_FLOW_PKT": 40,
+         "LONGEST_FLOW_PKT": 1500, "MIN_IP_PKT_LEN": 20,
+         "MAX_IP_PKT_LEN": 1480, "OUT_BYTES": 985000, "OUT_PKTS": 1200,
+         "DST_TO_SRC_SECOND_BYTES": 4500, "NUM_PKTS_UP_TO_128_BYTES": 950},
+        # Suspicious: small packet flood
+        {"MIN_TTL": 128, "MAX_TTL": 128, "SHORTEST_FLOW_PKT": 60,
+         "LONGEST_FLOW_PKT": 60, "MIN_IP_PKT_LEN": 40,
+         "MAX_IP_PKT_LEN": 40, "OUT_BYTES": 60000, "OUT_PKTS": 1000,
+         "DST_TO_SRC_SECOND_BYTES": 0, "NUM_PKTS_UP_TO_128_BYTES": 1000},
+    ]
+
+    print(f"{'Time':^10s} │ {'Level':^8s} │ {'Score':^12s} │ Flow Description")
+    print("─" * 70)
+
+    labels = ["Normal browsing", "Data exfiltration pattern", "UDP flood pattern"]
+
+    for flow_dict, label in zip(test_flows, labels):
+        feature_vector = np.array([flow_dict[f] for f in CANONICAL_FEATURES],
+                                  dtype=np.float64)
+        result = engine.analyze(feature_vector, feature_dict=flow_dict)
+
+        if result.alert_level == "CRITICAL":
+            color = "\033[91m"
+        elif result.alert_level == "WARNING":
+            color = "\033[93m"
+        else:
+            color = "\033[92m"
+        reset = "\033[0m"
+
+        timestamp = time.strftime("%H:%M:%S")
+        print(
+            f"[{timestamp}] {color}{result.alert_level:8s}{reset} │ "
+            f"Score: {result.anomaly_score:+.4f} │ "
+            f"{label}"
+        )
+
+    print("\nOffline test complete.")
+
+
+# ---------------------------------------------------------------------------
+# CLI Entry Point
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="eBPF/XDP Flow Tracker — NIDS Data Plane Listener",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Live mode (Linux with BCC, requires root):
+  sudo python -m src.ebpf.user_space --interface eth0
+
+  # With API forwarding:
+  sudo python -m src.ebpf.user_space --interface eth0 --api http://localhost:8000
+
+  # Offline test mode (any OS):
+  python -m src.ebpf.user_space --offline
+        """
+    )
+    parser.add_argument(
+        "--interface", "-i", type=str, default="eth0",
+        help="Network interface to attach XDP program to (default: eth0)"
+    )
+    parser.add_argument(
+        "--artifacts-dir", type=str, default=".",
+        help="Directory containing .pkl model artifacts"
+    )
+    parser.add_argument(
+        "--api", type=str, default=None,
+        help="FastAPI URL for forwarding results (e.g., http://localhost:8000)"
+    )
+    parser.add_argument(
+        "--offline", action="store_true",
+        help="Run in offline test mode (no eBPF, synthetic flows)"
+    )
+
+    args = parser.parse_args()
+
+    if args.offline:
+        run_offline_test(artifacts_dir=args.artifacts_dir)
+    else:
+        run_listener(
+            interface=args.interface,
+            artifacts_dir=args.artifacts_dir,
+            api_url=args.api,
+        )
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+File: src\ebpf\__init__.py
+================================================================================
+
+# src.ebpf package init
+
+
+================================================================================
+File: src\ml\engine.py
+================================================================================
+
+"""
+NIDS ML Engine — Cost-Sensitive Anomaly Detection with Alert Fatigue Management
+
+This module replaces the naive `prediction == -1` logic with:
+1. A cost-sensitive threshold derived from the ROC curve and a FP/FN cost matrix.
+2. A rolling-window spike detector that suppresses low-severity noise and only
+   escalates sustained anomaly bursts to CRITICAL.
+
+Academic Reference:
+    - Elkan, C. (2001). "The Foundations of Cost-Sensitive Learning."
+    - UNSW-NB15 Dataset: Moustafa & Slay (2015).
+
+Author: NIDS Research Team
+"""
+
+import time
+import json
+import logging
+import numpy as np
+import joblib
+import threading
+from pathlib import Path
+from collections import deque
+from dataclasses import dataclass, field, asdict
+from typing import Optional, List, Dict, Tuple
+from enum import Enum
+
+# ---------------------------------------------------------------------------
+# Configuration & Constants
+# ---------------------------------------------------------------------------
+
+# Default cost ratio: missing an attack is 10x worse than a false alarm
+DEFAULT_COST_FP = 1.0    # Cost of a False Positive (analyst time wasted)
+DEFAULT_COST_FN = 10.0   # Cost of a False Negative (attack undetected)
+
+# Spike detection parameters
+ROLLING_WINDOW_SECONDS = 60   # Time window for moving average
+SPIKE_SIGMA_MULTIPLIER = 1.5  # Spike = score > mean + (multiplier * std_dev)
+
+# The canonical 10-feature set from UNSW-NB15 (trained via train_baseline.py)
+CANONICAL_FEATURES = [
+    "MIN_TTL",
+    "MAX_TTL",
+    "SHORTEST_FLOW_PKT",
+    "LONGEST_FLOW_PKT",
+    "MIN_IP_PKT_LEN",
+    "MAX_IP_PKT_LEN",
+    "OUT_BYTES",
+    "OUT_PKTS",
+    "DST_TO_SRC_SECOND_BYTES",
+    "NUM_PKTS_UP_TO_128_BYTES",
+]
+
+logger = logging.getLogger("nids.engine")
+
+
+class AlertLevel(Enum):
+    """Three-tier alert classification to combat SOC alert fatigue."""
+    NORMAL = "NORMAL"
+    WARNING = "WARNING"
+    CRITICAL = "CRITICAL"
+
+
+@dataclass
+class DetectionResult:
+    """Structured output of a single flow analysis."""
+    timestamp: float
+    anomaly_score: float
+    threshold: float
+    is_anomaly: bool
+    alert_level: str            # AlertLevel value
+    features: Dict[str, float]
+    spike_info: Optional[Dict] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Cost-Sensitive Threshold Calculator
+# ---------------------------------------------------------------------------
+
+class CostSensitiveThreshold:
+    """
+    Computes the optimal decision boundary for Isolation Forest by minimizing
+    the total misclassification cost on a validation set.
+
+    The Isolation Forest `decision_function` returns a signed anomaly score:
+        - Large positive → clearly normal
+        - Near zero      → borderline
+        - Negative        → clearly anomalous
+
+    Instead of using the default 0.0 cutoff, we sweep thresholds on a
+    labelled validation set and pick the one that minimizes:
+
+        TotalCost = C_FP * FP_count + C_FN * FN_count
+
+    This is the standard Elkan (2001) cost-sensitive approach.
+    """
+
+    def __init__(self, cost_fp: float = DEFAULT_COST_FP,
+                 cost_fn: float = DEFAULT_COST_FN):
+        self.cost_fp = cost_fp
+        self.cost_fn = cost_fn
+        self.optimal_threshold = 0.0  # Will be calibrated
+
+    def calibrate(self, scores: np.ndarray, labels: np.ndarray,
+                  n_thresholds: int = 500) -> float:
+        """
+        Sweep thresholds across the score range and find the cost-optimal one.
+
+        Args:
+            scores: Anomaly scores from model.decision_function(X_val).
+            labels: Ground truth (0 = normal, 1 = attack).
+            n_thresholds: Resolution of the threshold sweep.
+
+        Returns:
+            The optimal threshold value.
+        """
+        # Isolation Forest convention: score < threshold → anomaly
+        # We sweep from min(scores) to max(scores)
+        thresholds = np.linspace(scores.min(), scores.max(), n_thresholds)
+
+        best_cost = np.inf
+        best_threshold = 0.0
+        cost_curve = []
+
+        for t in thresholds:
+            # Predict: anything below threshold is flagged as anomaly
+            predicted_anomaly = scores < t
+
+            # Ground truth: label == 1 means actual attack
+            actual_attack = labels == 1
+
+            # False Positive: predicted anomaly but actually normal
+            fp = np.sum(predicted_anomaly & ~actual_attack)
+            # False Negative: predicted normal but actually attack
+            fn = np.sum(~predicted_anomaly & actual_attack)
+
+            total_cost = (self.cost_fp * fp) + (self.cost_fn * fn)
+            cost_curve.append((float(t), float(total_cost), int(fp), int(fn)))
+
+            if total_cost < best_cost:
+                best_cost = total_cost
+                best_threshold = float(t)
+
+        self.optimal_threshold = best_threshold
+        logger.info(
+            f"Cost-sensitive calibration complete. "
+            f"Optimal threshold: {best_threshold:.6f} "
+            f"(C_FP={self.cost_fp}, C_FN={self.cost_fn}, "
+            f"MinCost={best_cost:.1f})"
+        )
+
+        return best_threshold
+
+    def calibrate_multi_ratio(self, scores: np.ndarray, labels: np.ndarray,
+                               ratios: List[Tuple[float, float]] = None
+                               ) -> Dict[str, float]:
+        """
+        Calibrate across multiple cost ratios for the IEEE paper's
+        sensitivity analysis graph.
+
+        Args:
+            scores: Anomaly scores from decision_function.
+            labels: Ground truth labels.
+            ratios: List of (C_FP, C_FN) tuples. Defaults to 1:5, 1:10, 1:20.
+
+        Returns:
+            Dictionary mapping "ratio_label" → optimal_threshold.
+        """
+        if ratios is None:
+            ratios = [(1.0, 5.0), (1.0, 10.0), (1.0, 20.0)]
+
+        results = {}
+        for c_fp, c_fn in ratios:
+            calc = CostSensitiveThreshold(cost_fp=c_fp, cost_fn=c_fn)
+            t = calc.calibrate(scores, labels)
+            key = f"1:{int(c_fn / c_fp)}"
+            results[key] = t
+            logger.info(f"  Ratio {key} → threshold = {t:.6f}")
+
+        return results
+
+
+# ---------------------------------------------------------------------------
+# Spike Detector (Alert Fatigue Management)
+# ---------------------------------------------------------------------------
+
+class SpikeDetector:
+    """
+    Implements a rolling-window anomaly rate tracker to distinguish between
+    persistent threats (CRITICAL) and transient noise (WARNING).
+
+    Mechanism:
+        - Maintains a deque of (timestamp, score) tuples within the window.
+        - Computes moving average (μ) and standard deviation (σ) of scores.
+        - A score is classified as a SPIKE if:  score > μ + (k * σ)
+        - Only spikes produce CRITICAL alerts.
+
+    This directly addresses SOC alert fatigue — the #1 operational complaint
+    in enterprise security operations centers.
+    """
+
+    def __init__(self, window_seconds: float = ROLLING_WINDOW_SECONDS,
+                 sigma_multiplier: float = SPIKE_SIGMA_MULTIPLIER):
+        self.window_seconds = window_seconds
+        self.sigma_multiplier = sigma_multiplier
+        self._history: deque = deque()
+        self._running_sum = 0.0
+        self._running_sq_sum = 0.0
+
+    def _evict_expired(self, now: float) -> None:
+        """Remove entries older than the rolling window."""
+        cutoff = now - self.window_seconds
+        while self._history and self._history[0][0] < cutoff:
+            _, old_intensity = self._history.popleft()
+            self._running_sum -= old_intensity
+            self._running_sq_sum -= (old_intensity * old_intensity)
+
+    def record_and_classify(self, score: float, is_anomaly: bool,
+                             timestamp: float = None) -> Tuple[AlertLevel, Dict]:
+        """
+        Record a new anomaly score and determine the alert level.
+
+        Args:
+            score: The raw anomaly score (from decision_function; lower = more anomalous).
+            is_anomaly: Whether the cost-sensitive threshold flagged this as anomaly.
+            timestamp: Optional explicit timestamp (defaults to time.time()).
+
+        Returns:
+            (AlertLevel, spike_info_dict)
+        """
+        now = timestamp or time.time()
+        self._evict_expired(now)
+
+        # We track the absolute deviation from zero (anomaly intensity).
+        # More negative scores = more anomalous, so we negate for spike math.
+        intensity = -score  # Higher intensity = more anomalous
+
+        self._history.append((now, intensity))
+        self._running_sum += intensity
+        self._running_sq_sum += (intensity * intensity)
+
+        # Calculate rolling statistics
+        n = len(self._history)
+        if n < 3:
+            # Not enough data for meaningful statistics
+            spike_info = {
+                "window_size": n,
+                "mean": float(intensity),
+                "std": 0.0,
+                "spike_threshold": float(intensity),
+                "is_spike": False,
+            }
+            level = AlertLevel.WARNING if is_anomaly else AlertLevel.NORMAL
+            return level, spike_info
+
+        mean = float(self._running_sum / n)
+        # Variance calculation with fallback for numerical precision
+        var = (self._running_sq_sum - (self._running_sum ** 2) / n) / n
+        std = float(max(0, var) ** 0.5)
+        spike_threshold = mean + (self.sigma_multiplier * std)
+
+        is_spike = intensity > spike_threshold
+
+        spike_info = {
+            "window_size": len(self._history),
+            "window_seconds": self.window_seconds,
+            "mean": round(mean, 6),
+            "std": round(std, 6),
+            "spike_threshold": round(spike_threshold, 6),
+            "current_intensity": round(float(intensity), 6),
+            "is_spike": is_spike,
+        }
+
+        # Three-tier classification
+        if is_anomaly and is_spike:
+            level = AlertLevel.CRITICAL
+        elif is_anomaly:
+            level = AlertLevel.WARNING
+        else:
+            level = AlertLevel.NORMAL
+
+        return level, spike_info
+
+
+# ---------------------------------------------------------------------------
+# Main Inference Engine
+# ---------------------------------------------------------------------------
+
+class NIDSEngine:
+    """
+    The core ML inference engine for the MVP NIDS.
+
+    Lifecycle:
+        1. Load pre-trained artifacts (model, scaler, threshold, features)
+        2. Accept 10-feature flow vectors from eBPF user-space
+        3. Scale → predict → cost-threshold → spike-classify
+        4. Return structured DetectionResult
+    """
+
+    def __init__(self, artifacts_dir: str = ".",
+                 cost_fp: float = DEFAULT_COST_FP,
+                 cost_fn: float = DEFAULT_COST_FN,
+                 window_seconds: float = ROLLING_WINDOW_SECONDS):
+        self.artifacts_dir = Path(artifacts_dir)
+        self.model = None
+        self.scaler = None
+        self.top_features: List[str] = []
+        self.threshold = 0.0
+        self.cost_calculator = CostSensitiveThreshold(cost_fp, cost_fn)
+        self.spike_detector = SpikeDetector(window_seconds=window_seconds)
+        self._initialized = False
+        self._alert_log: deque = deque(maxlen=100000)
+        self._log_lock = threading.Lock()
+
+    def load_artifacts(self,
+                       model_path: str = None,
+                       scaler_path: str = None,
+                       features_path: str = None,
+                       threshold_path: str = None) -> None:
+        """
+        Load pre-trained Isolation Forest artifacts from disk.
+
+        These are produced by `src/ml/train_baseline.py` (offline training
+        on UNSW-NB15 — no synthetic data).
+        """
+        base = self.artifacts_dir
+
+        model_path = model_path or str(base / "isolation_forest_model.pkl")
+        scaler_path = scaler_path or str(base / "scaler.pkl")
+        features_path = features_path or str(base / "top_features.pkl")
+        threshold_path = threshold_path or str(base / "optimal_threshold.pkl")
+
+        logger.info("Loading model artifacts...")
+
+        self.model = joblib.load(model_path)
+        logger.info(f"  [✔] Model loaded: {model_path}")
+
+        self.scaler = joblib.load(scaler_path)
+        logger.info(f"  [✔] Scaler loaded: {scaler_path}")
+
+        self.top_features = joblib.load(features_path)
+        logger.info(f"  [✔] Features ({len(self.top_features)}): {self.top_features}")
+
+        # Load calibrated threshold if available; otherwise use default 0.0
+        threshold_file = Path(threshold_path)
+        if threshold_file.exists():
+            self.threshold = joblib.load(threshold_path)
+            logger.info(f"  [✔] Cost-sensitive threshold: {self.threshold:.6f}")
+        else:
+            self.threshold = 0.0
+            logger.warning(
+                f"  [!] Threshold file not found at {threshold_path}. "
+                f"Using default threshold=0.0. Run train_baseline.py to calibrate."
+            )
+
+        self._initialized = True
+        logger.info("Engine initialized successfully.")
+
+    def analyze(self, feature_vector: np.ndarray,
+                feature_dict: Dict[str, float] = None) -> DetectionResult:
+        """
+        Run full inference pipeline on a single flow.
+
+        Args:
+            feature_vector: Raw 10-feature numpy array (unscaled).
+            feature_dict: Optional pre-built {name: value} dict for the result.
+
+        Returns:
+            DetectionResult with score, threshold, alert level, and spike info.
+        """
+        if not self._initialized:
+            raise RuntimeError("Engine not initialized. Call load_artifacts() first.")
+
+        # Ensure 2D
+        X = np.atleast_2d(feature_vector)
+
+        # Scale
+        X_scaled = self.scaler.transform(X)
+
+        # Anomaly score (lower = more anomalous)
+        score = float(self.model.decision_function(X_scaled)[0])
+
+        # Cost-sensitive decision: anomaly if score < calibrated threshold
+        is_anomaly = score < self.threshold
+
+        # Spike detection
+        alert_level, spike_info = self.spike_detector.record_and_classify(
+            score=score, is_anomaly=is_anomaly
+        )
+
+        # Build feature dict if not provided
+        if feature_dict is None:
+            feature_dict = {
+                name: float(X[0, i])
+                for i, name in enumerate(self.top_features)
+            }
+
+        result = DetectionResult(
+            timestamp=time.time(),
+            anomaly_score=round(score, 6),
+            threshold=round(self.threshold, 6),
+            is_anomaly=is_anomaly,
+            alert_level=alert_level.value,
+            features=feature_dict,
+            spike_info=spike_info,
+        )
+
+        with self._log_lock:
+            self._alert_log.append(result)
+
+        return result
+
+    def get_recent_alerts(self, n: int = 50,
+                          level_filter: str = None) -> List[dict]:
+        """Retrieve recent alerts, optionally filtered by level."""
+        with self._log_lock:
+            # deque sliding needs to be converted to list
+            alerts = list(self._alert_log)[-n:]
+        if level_filter:
+            alerts = [a for a in alerts if a.alert_level == level_filter]
+        return [a.to_dict() for a in alerts]
+
+    @property
+    def is_initialized(self) -> bool:
+        return self._initialized
+
+
+# ---------------------------------------------------------------------------
+# Module-level convenience (for direct script testing)
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(name)s] %(message)s")
+
+    engine = NIDSEngine(artifacts_dir=".")
+    engine.load_artifacts()
+
+    # Quick smoke test with a synthetic flow
+    test_flow = np.array([64, 128, 40, 1500, 20, 1480, 50000, 30, 12000, 45],
+                         dtype=np.float64)
+
+    result = engine.analyze(test_flow)
+    print("\n--- Detection Result ---")
+    print(result.to_json())
+
+
+================================================================================
+File: src\ml\train_baseline.py
+================================================================================
+
+"""
+NIDS Training Pipeline — Offline Model Training on UNSW-NB15
+
+This script is the single source of truth for model training. It replaces
+ALL synthetic data generation with real-world labelled NetFlow data.
+
+Pipeline Steps:
+    1. Load and clean NF-UNSW-NB15-v2.csv
+    2. Feature selection via RandomForest importance (Top 10)
+    3. Train Isolation Forest on normal traffic only (unsupervised baseline)
+    4. Calibrate cost-sensitive threshold on a validation split
+    5. Export: model, scaler, features list, optimal threshold
+
+Output Artifacts:
+    - isolation_forest_model.pkl   (trained Isolation Forest)
+    - scaler.pkl                   (StandardScaler fitted on normal data)
+    - top_features.pkl             (ordered list of 10 feature names)
+    - optimal_threshold.pkl        (cost-calibrated decision boundary)
+    - threshold_sensitivity.json   (multi-ratio analysis for IEEE paper)
+
+Author: NIDS Research Team
+"""
+
+import json
+import logging
+import warnings
+from pathlib import Path
+
+import joblib
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import IsolationForest, RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+# Import our cost-sensitive threshold module
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from src.ml.engine import CostSensitiveThreshold, DEFAULT_COST_FP, DEFAULT_COST_FN
+
+warnings.filterwarnings("ignore")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger("nids.train")
+
+
+def train_nids_pipeline(
+    dataset_path: str = "NF-UNSW-NB15-v2.csv",
+    output_dir: str = ".",
+    n_top_features: int = 10,
+    contamination: float = 0.01,
+    cost_fp: float = DEFAULT_COST_FP,
+    cost_fn: float = DEFAULT_COST_FN,
+    test_size: float = 0.2,
+    random_state: int = 42,
+):
+    """
+    Full training pipeline: load → clean → select → train → calibrate → export.
+
+    Args:
+        dataset_path: Path to the NF-UNSW-NB15-v2.csv dataset.
+        output_dir:   Directory for exported .pkl artifacts.
+        n_top_features: Number of features to select (default: 10).
+        contamination:  Isolation Forest contamination parameter.
+        cost_fp:        False Positive cost for threshold calibration.
+        cost_fn:        False Negative cost for threshold calibration.
+        test_size:      Fraction of data held out for threshold calibration.
+        random_state:   Random seed for reproducibility.
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # ===================================================================
+    # STEP 1: DATA LOADING & CLEANING
+    # ===================================================================
+    logger.info(f"Loading dataset: {dataset_path}")
+
+    try:
+        df = pd.read_csv(dataset_path)
+    except FileNotFoundError:
+        logger.error(
+            f"Dataset '{dataset_path}' not found. "
+            f"Download NF-UNSW-NB15-v2.csv and place it in the project root."
+        )
+        return
+
+    logger.info(f"Dataset loaded: {df.shape[0]:,} rows × {df.shape[1]} columns")
+
+    # Drop identity columns that cause memorization instead of behavioral learning
+    identity_cols = [
+        "IPV4_SRC_ADDR", "IPV4_DST_ADDR",
+        "L2_IPV4_CLIENT_MAC", "L2_IPV4_SERVER_MAC",
+        "id", "Attack",
+    ]
+    existing_drops = [c for c in identity_cols if c in df.columns]
+    df_cleaned = df.drop(columns=existing_drops)
+
+    # Separate target label
+    y = df_cleaned["Label"]
+    X = df_cleaned.drop(columns=["Label"])
+
+    # One-Hot encode categoricals, handle infinities and NaN
+    X = pd.get_dummies(X)
+    X.replace([np.inf, -np.inf], np.nan, inplace=True)
+    X.fillna(0, inplace=True)
+
+    logger.info(f"Cleaned feature matrix: {X.shape[0]:,} × {X.shape[1]} features")
+
+    # ===================================================================
+    # STEP 2: FEATURE SELECTION (LIGHTWEIGHT ARCHITECTURE)
+    # ===================================================================
+    logger.info(f"Selecting Top {n_top_features} features via RandomForest importance...")
+
+    rf = RandomForestClassifier(
+        n_estimators=50, n_jobs=-1, random_state=random_state
+    )
+    rf.fit(X, y)
+
+    importances = pd.Series(rf.feature_importances_, index=X.columns)
+    top_features = importances.sort_values(ascending=False).head(n_top_features).index.tolist()
+
+    logger.info("Selected features:")
+    for i, feat in enumerate(top_features, 1):
+        score = importances[feat]
+        logger.info(f"  {i:2d}. {feat:<35s} (importance: {score:.6f})")
+
+    X_optimized = X[top_features]
+
+    # ===================================================================
+    # STEP 3: TRAIN/VALIDATION SPLIT
+    # ===================================================================
+    # We split BEFORE training so the threshold calibration uses unseen data.
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_optimized, y, test_size=test_size,
+        random_state=random_state, stratify=y
+    )
+
+    logger.info(
+        f"Split: {X_train.shape[0]:,} train / {X_val.shape[0]:,} validation  "
+        f"(Attack ratio in val: {y_val.mean():.2%})"
+    )
+
+    # ===================================================================
+    # STEP 4: ISOLATION FOREST TRAINING (NORMAL TRAFFIC ONLY)
+    # ===================================================================
+    logger.info("Training Isolation Forest on normal traffic...")
+
+    # Filter to normal traffic (Label == 0) for unsupervised training
+    normal_mask = y_train == 0
+    X_train_normal = X_train[normal_mask]
+
+    # Fit scaler on normal traffic
+    scaler = StandardScaler()
+    X_train_normal_scaled = scaler.fit_transform(X_train_normal)
+
+    logger.info(f"  Normal training samples: {X_train_normal_scaled.shape[0]:,}")
+
+    # Train Isolation Forest
+    model = IsolationForest(
+        n_estimators=100,
+        contamination=contamination,
+        random_state=random_state,
+        n_jobs=-1,
+    )
+    model.fit(X_train_normal_scaled)
+    logger.info("  [✔] Isolation Forest fitted.")
+
+    # ===================================================================
+    # STEP 5: COST-SENSITIVE THRESHOLD CALIBRATION
+    # ===================================================================
+    logger.info(
+        f"Calibrating cost-sensitive threshold "
+        f"(C_FP={cost_fp}, C_FN={cost_fn})..."
+    )
+
+    # Score the validation set
+    X_val_scaled = scaler.transform(X_val)
+    val_scores = model.decision_function(X_val_scaled)
+
+    # Primary calibration
+    calibrator = CostSensitiveThreshold(cost_fp=cost_fp, cost_fn=cost_fn)
+    optimal_threshold = calibrator.calibrate(val_scores, y_val.values)
+
+    # Multi-ratio sensitivity analysis (for the IEEE paper)
+    logger.info("Running sensitivity analysis across cost ratios...")
+    sensitivity_results = calibrator.calibrate_multi_ratio(
+        val_scores, y_val.values,
+        ratios=[(1.0, 5.0), (1.0, 10.0), (1.0, 20.0)]
+    )
+
+    # Quick performance summary at the chosen threshold
+    predicted_anomaly = val_scores < optimal_threshold
+    actual_attack = y_val.values == 1
+
+    tp = int(np.sum(predicted_anomaly & actual_attack))
+    fp = int(np.sum(predicted_anomaly & ~actual_attack))
+    fn = int(np.sum(~predicted_anomaly & actual_attack))
+    tn = int(np.sum(~predicted_anomaly & ~actual_attack))
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    logger.info(f"\n  === Validation Performance (threshold={optimal_threshold:.6f}) ===")
+    logger.info(f"  TP={tp:,}  FP={fp:,}  FN={fn:,}  TN={tn:,}")
+    logger.info(f"  Precision: {precision:.4f}")
+    logger.info(f"  Recall:    {recall:.4f}")
+    logger.info(f"  F1-Score:  {f1:.4f}")
+
+    # ===================================================================
+    # STEP 6: EXPORT ARTIFACTS
+    # ===================================================================
+    logger.info("\nExporting artifacts...")
+
+    artifacts = {
+        "isolation_forest_model.pkl": model,
+        "scaler.pkl": scaler,
+        "top_features.pkl": top_features,
+        "optimal_threshold.pkl": optimal_threshold,
+    }
+
+    for name, obj in artifacts.items():
+        path = output_path / name
+        joblib.dump(obj, path)
+        logger.info(f"  [✔] {name}")
+
+    # Export sensitivity analysis as JSON (for paper graphs)
+    sensitivity_path = output_path / "threshold_sensitivity.json"
+    sensitivity_data = {
+        "cost_ratios": sensitivity_results,
+        "validation_metrics": {
+            "threshold": optimal_threshold,
+            "precision": precision,
+            "recall": recall,
+            "f1_score": f1,
+            "confusion_matrix": {"TP": tp, "FP": fp, "FN": fn, "TN": tn},
+        },
+    }
+    with open(sensitivity_path, "w") as f:
+        json.dump(sensitivity_data, f, indent=2)
+    logger.info(f"  [✔] threshold_sensitivity.json")
+
+    logger.info("\n" + "=" * 60)
+    logger.info("TRAINING PIPELINE COMPLETE")
+    logger.info(f"Optimal Threshold: {optimal_threshold:.6f}")
+    logger.info(f"Artifacts saved to: {output_path.resolve()}")
+    logger.info("=" * 60)
+
+
+if __name__ == "__main__":
+    train_nids_pipeline()
+
+
+================================================================================
+File: src\ml\__init__.py
+================================================================================
+
+# src.ml package init
+
+
+================================================================================
+File: src\xai\counterfactual_demo.py
+================================================================================
+
+"""
+Counterfactual SHAP Causality Demo — Interactive CLI Script
+
+This is the PRESENTATION SHOWPIECE. It proves that the model's decisions are
+driven by causal feature contributions, not mere statistical correlation.
+
+Flow:
+    1. Loads a sample anomalous network flow (from JSON file or built-in sample).
+    2. Runs Isolation Forest prediction → shows ANOMALY verdict with score.
+    3. Computes SHAP values → displays ranked feature impact in terminal.
+    4. Identifies the TOP contributing feature.
+    5. Prompts user: "Reduce [feature] by 50%? (y/n)"
+    6. Modifies the feature, re-runs prediction → shows NORMAL verdict.
+    7. Prints causal conclusion proving the model's interpretability.
+
+Usage:
+    python -m src.xai.counterfactual_demo
+    python -m src.xai.counterfactual_demo --flow-file suspicious_flow.json
+
+Academic Reference:
+    - Wachter, Mittelstadt & Russell (2017). "Counterfactual Explanations
+      Without Opening the Black Box."
+
+Author: NIDS Research Team
+"""
+
+import sys
+import os
+import json
+import argparse
+import logging
+import numpy as np
+import joblib
+from pathlib import Path
+from typing import Dict, Optional
+
+# Fix Windows terminal encoding (cp1254/cp1252 can't render Unicode box chars)
+if sys.platform == "win32":
+    os.system("")  # Enable ANSI escape codes on Windows 10+
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+# Ensure project root is in path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from src.ml.engine import NIDSEngine, CANONICAL_FEATURES
+from src.xai.explainer import NIDSExplainer
+
+logging.basicConfig(level=logging.WARNING)
+
+# ---------------------------------------------------------------------------
+# Terminal Color Utilities (cross-platform ANSI)
+# ---------------------------------------------------------------------------
+
+class Colors:
+    """ANSI color codes for terminal output."""
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    MAGENTA = "\033[95m"
+    CYAN = "\033[96m"
+    WHITE = "\033[97m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RESET = "\033[0m"
+
+    @staticmethod
+    def colored(text: str, color: str) -> str:
+        return f"{color}{text}{Colors.RESET}"
+
+
+def print_header():
+    """Print the demo header banner."""
+    print()
+    print(Colors.colored("=" * 70, Colors.CYAN))
+    print(Colors.colored("  COUNTERFACTUAL SHAP CAUSALITY DEMONSTRATION", Colors.BOLD + Colors.CYAN))
+    print(Colors.colored("  Proving AI Decision Causality, Not Correlation", Colors.DIM + Colors.CYAN))
+    print(Colors.colored("=" * 70, Colors.CYAN))
+    print()
+
+
+def print_section(title: str):
+    """Print a section divider."""
+    print()
+    print(Colors.colored(f"── {title} ", Colors.BOLD + Colors.YELLOW) +
+          Colors.colored("─" * (60 - len(title)), Colors.DIM + Colors.YELLOW))
+    print()
+
+
+def print_verdict(is_anomaly: bool, score: float, threshold: float):
+    """Print the model's verdict with color coding."""
+    if is_anomaly:
+        verdict_text = "⚠  ANOMALY DETECTED"
+        color = Colors.RED
+    else:
+        verdict_text = "✔  NORMAL TRAFFIC"
+        color = Colors.GREEN
+
+    print(f"  Verdict:   {Colors.colored(Colors.BOLD + verdict_text, color)}")
+    print(f"  Score:     {score:.6f}")
+    print(f"  Threshold: {threshold:.6f}")
+    print(f"  Decision:  score {'<' if is_anomaly else '≥'} threshold → "
+          f"{Colors.colored('ANOMALY' if is_anomaly else 'NORMAL', color)}")
+
+
+def print_shap_bar(feature: str, shap_val: float, max_abs: float, rank: int):
+    """Print a single SHAP feature contribution as a terminal bar."""
+    bar_width = 30
+    normalized = abs(shap_val) / max_abs if max_abs > 0 else 0
+    bar_len = int(normalized * bar_width)
+
+    if shap_val < 0:
+        # Pushes toward anomaly
+        bar = Colors.colored("█" * bar_len, Colors.RED)
+        direction = Colors.colored("← ANOMALY", Colors.RED)
+    else:
+        # Pushes toward normal
+        bar = Colors.colored("█" * bar_len, Colors.GREEN)
+        direction = Colors.colored("NORMAL →", Colors.GREEN)
+
+    prefix = Colors.colored(f"  #{rank}", Colors.BOLD) if rank == 1 else f"  #{rank}"
+    print(f"{prefix}  {feature:<32s}  {bar}  {shap_val:+.6f}  {direction}")
+
+
+def print_feature_table(features: Dict[str, float], highlight_feature: str = None):
+    """Print feature values in a clean table format."""
+    print(f"  {'Feature':<32s}  {'Value':>12s}")
+    print(f"  {'─' * 32}  {'─' * 12}")
+    for name, val in features.items():
+        if name == highlight_feature:
+            line = Colors.colored(f"  {name:<32s}  {val:>12.2f}  ◄", Colors.YELLOW + Colors.BOLD)
+        else:
+            line = f"  {name:<32s}  {val:>12.2f}"
+        print(line)
+
+
+# ---------------------------------------------------------------------------
+# Built-in Anomalous Sample (for demo without external files)
+# ---------------------------------------------------------------------------
+
+# This flow mimics a borderline data exfiltration pattern:
+# - OUT_BYTES is just above the anomaly threshold — dominant driver
+# - Reducing OUT_BYTES by 50% flips the verdict to NORMAL (causality proof)
+BUILTIN_ANOMALOUS_FLOW = {
+    "MIN_TTL": 62.0,
+    "MAX_TTL": 64.0,
+    "SHORTEST_FLOW_PKT": 54.0,
+    "LONGEST_FLOW_PKT": 1500.0,
+    "MIN_IP_PKT_LEN": 40.0,
+    "MAX_IP_PKT_LEN": 1480.0,
+    "OUT_BYTES": 80000.0,
+    "OUT_PKTS": 45.0,
+    "DST_TO_SRC_SECOND_BYTES": 8500.0,
+    "NUM_PKTS_UP_TO_128_BYTES": 12.0,
+}
+
+
+# ---------------------------------------------------------------------------
+# Main Demo Logic
+# ---------------------------------------------------------------------------
+
+def load_flow_from_file(path: str) -> Dict[str, float]:
+    """Load a flow sample from a JSON file."""
+    with open(path, "r") as f:
+        data = json.load(f)
+
+    # Support both flat dict and nested {"features": {...}} format
+    if "features" in data:
+        return data["features"]
+    return data
+
+
+def run_demo(artifacts_dir: str = ".", flow_file: str = None,
+             reduction_pct: float = 50.0, auto_mode: bool = False):
+    """
+    Execute the full counterfactual demonstration.
+
+    Args:
+        artifacts_dir: Path to model artifacts (.pkl files).
+        flow_file: Optional JSON file with anomalous flow data.
+        reduction_pct: Percentage to reduce the top feature (default: 50%).
+        auto_mode: If True, skip user prompts (for automated testing).
+    """
+    print_header()
+
+    # ── Step 1: Load Model ────────────────────────────────────────────────
+    print_section("STEP 1: Loading Model Artifacts")
+
+    engine = NIDSEngine(artifacts_dir=artifacts_dir)
+    try:
+        engine.load_artifacts()
+    except FileNotFoundError as e:
+        print(Colors.colored(f"  [✘] Failed to load artifacts: {e}", Colors.RED))
+        print(f"  Run 'python -m src.ml.train_baseline' first.")
+        return
+
+    explainer = NIDSExplainer.from_artifacts(artifacts_dir)
+    print(Colors.colored("  [✔] Model and SHAP explainer loaded.", Colors.GREEN))
+
+    # ── Step 2: Load Anomalous Sample ─────────────────────────────────────
+    print_section("STEP 2: Loading Suspicious Network Flow")
+
+    if flow_file:
+        print(f"  Source: {flow_file}")
+        flow_data = load_flow_from_file(flow_file)
+    else:
+        print("  Source: Built-in anomalous flow sample (Data Exfiltration pattern)")
+        flow_data = BUILTIN_ANOMALOUS_FLOW.copy()
+
+    print_feature_table(flow_data)
+
+    # ── Step 3: Initial Prediction ────────────────────────────────────────
+    print_section("STEP 3: Initial Model Prediction")
+
+    feature_vector = np.array([flow_data[f] for f in engine.top_features], dtype=np.float64)
+    result = engine.analyze(feature_vector, feature_dict=flow_data)
+
+    print_verdict(result.is_anomaly, result.anomaly_score, result.threshold)
+
+    if not result.is_anomaly:
+        print()
+        print(Colors.colored(
+            "  [!] Flow is already classified as NORMAL. "
+            "Use a more extreme flow for demonstration.", Colors.YELLOW))
+        print("      Try increasing OUT_BYTES or NUM_PKTS_UP_TO_128_BYTES.")
+        return
+
+    # ── Step 4: SHAP Explanation ──────────────────────────────────────────
+    print_section("STEP 4: SHAP Feature Attribution Analysis")
+
+    X_scaled = engine.scaler.transform(np.atleast_2d(feature_vector))
+    report = explainer.explain(X_scaled, feature_values=flow_data, top_k=10)
+
+    print(f"  Base Value (expected): {report.shap_base_value:.6f}")
+    print()
+
+    # Sort by absolute SHAP for the bar chart
+    shap_dict = explainer.get_shap_dict(X_scaled)
+    sorted_features = sorted(shap_dict.items(), key=lambda x: abs(x[1]), reverse=True)
+    max_abs_shap = max(abs(v) for _, v in sorted_features) if sorted_features else 1.0
+
+    for rank, (feat, shap_val) in enumerate(sorted_features, 1):
+        print_shap_bar(feat, shap_val, max_abs_shap, rank)
+
+    # Identify top anomaly-driving feature
+    top_anomaly_features = [(f, v) for f, v in sorted_features if v < 0]
+    if not top_anomaly_features:
+        print(Colors.colored("\n  [!] No features push toward anomaly. Cannot demonstrate counterfactual.", Colors.YELLOW))
+        return
+
+    top_feature_name, top_shap_value = top_anomaly_features[0]
+
+    print()
+    print(Colors.colored(f"  ▸ Top anomaly driver: {top_feature_name} "
+                         f"(SHAP = {top_shap_value:+.6f})", Colors.BOLD + Colors.MAGENTA))
+
+    # Print NLG insight for the top feature
+    for exp in report.explanations:
+        if exp["feature_name"] == top_feature_name:
+            print(Colors.colored(f"    → {exp['insight']}", Colors.MAGENTA))
+            if exp.get("mitre_id"):
+                print(Colors.colored(
+                    f"    → MITRE ATT&CK: {exp['mitre_id']} — {exp['mitre_technique']}", Colors.DIM))
+            break
+
+    # ── Step 5: Counterfactual Intervention ───────────────────────────────
+    print_section("STEP 5: Counterfactual Intervention")
+
+    original_value = flow_data[top_feature_name]
+    reduced_value = original_value * (1 - reduction_pct / 100.0)
+
+    print(f"  Target feature:  {top_feature_name}")
+    print(f"  Original value:  {original_value:,.2f}")
+    print(f"  Proposed change: Reduce by {reduction_pct:.0f}% → {reduced_value:,.2f}")
+    print()
+
+    if not auto_mode:
+        try:
+            user_input = input(
+                Colors.colored(
+                    f"  Apply counterfactual intervention? (y/n): ",
+                    Colors.BOLD + Colors.YELLOW
+                )
+            ).strip().lower()
+            if user_input not in ("y", "yes", ""):
+                print("  Aborted by user.")
+                return
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Aborted.")
+            return
+
+    # Apply the counterfactual modification
+    modified_flow = flow_data.copy()
+    modified_flow[top_feature_name] = reduced_value
+
+    print()
+    print(Colors.colored("  Applying counterfactual modification...", Colors.CYAN))
+    print()
+    print_feature_table(modified_flow, highlight_feature=top_feature_name)
+
+    # ── Step 6: Re-evaluation ─────────────────────────────────────────────
+    print_section("STEP 6: Re-evaluation After Intervention")
+
+    modified_vector = np.array([modified_flow[f] for f in engine.top_features], dtype=np.float64)
+    modified_result = engine.analyze(modified_vector, feature_dict=modified_flow)
+
+    print_verdict(modified_result.is_anomaly, modified_result.anomaly_score,
+                  modified_result.threshold)
+
+    # ── Step 7: Causality Conclusion ──────────────────────────────────────
+    print_section("STEP 7: Causality Analysis Conclusion")
+
+    score_delta = modified_result.anomaly_score - result.anomaly_score
+
+    print(f"  Original Score:  {result.anomaly_score:.6f} → "
+          f"{Colors.colored('ANOMALY', Colors.RED)}")
+    print(f"  Modified Score:  {modified_result.anomaly_score:.6f} → "
+          f"{Colors.colored('NORMAL' if not modified_result.is_anomaly else 'ANOMALY', Colors.GREEN if not modified_result.is_anomaly else Colors.RED)}")
+    print(f"  Score Delta:     {score_delta:+.6f}")
+    print()
+
+    if not modified_result.is_anomaly:
+        print(Colors.colored("  ╔══════════════════════════════════════════════════════════╗", Colors.GREEN))
+        print(Colors.colored("  ║  CAUSALITY PROVEN: The model's anomaly decision was     ║", Colors.GREEN))
+        print(Colors.colored(f"  ║  causally driven by '{top_feature_name}'.", Colors.GREEN))
+        padding = 55 - len(top_feature_name)
+        print(Colors.colored(f"  ║  Reducing this single feature by {reduction_pct:.0f}% reversed the    ║", Colors.GREEN))
+        print(Colors.colored("  ║  verdict from ANOMALY → NORMAL, demonstrating that      ║", Colors.GREEN))
+        print(Colors.colored("  ║  SHAP attributions reflect genuine causal relationships, ║", Colors.GREEN))
+        print(Colors.colored("  ║  not mere statistical correlations.                     ║", Colors.GREEN))
+        print(Colors.colored("  ╚══════════════════════════════════════════════════════════╝", Colors.GREEN))
+    else:
+        print(Colors.colored("  ╔══════════════════════════════════════════════════════════╗", Colors.YELLOW))
+        print(Colors.colored("  ║  PARTIAL CAUSALITY: Reducing the top feature shifted    ║", Colors.YELLOW))
+        print(Colors.colored("  ║  the score but did not fully reverse the decision.      ║", Colors.YELLOW))
+        print(Colors.colored("  ║  This indicates a multi-factor anomaly pattern.         ║", Colors.YELLOW))
+        print(Colors.colored("  ║  Try reducing multiple features or using a larger %.    ║", Colors.YELLOW))
+        print(Colors.colored("  ╚══════════════════════════════════════════════════════════╝", Colors.YELLOW))
+
+    print()
+    print(Colors.colored("  Demo complete.", Colors.DIM))
+    print()
+
+
+# ---------------------------------------------------------------------------
+# CLI Entry Point
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Counterfactual SHAP Causality Demonstration for NIDS",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python -m src.xai.counterfactual_demo
+  python -m src.xai.counterfactual_demo --flow-file suspicious_flow.json
+  python -m src.xai.counterfactual_demo --reduction 70 --auto
+        """
+    )
+    parser.add_argument(
+        "--artifacts-dir", type=str, default=".",
+        help="Directory containing .pkl model artifacts (default: current dir)"
+    )
+    parser.add_argument(
+        "--flow-file", type=str, default=None,
+        help="JSON file containing anomalous flow data (optional)"
+    )
+    parser.add_argument(
+        "--reduction", type=float, default=50.0,
+        help="Percentage to reduce the top contributing feature (default: 50%%)"
+    )
+    parser.add_argument(
+        "--auto", action="store_true",
+        help="Skip interactive prompts (for automated testing/CI)"
+    )
+
+    args = parser.parse_args()
+    run_demo(
+        artifacts_dir=args.artifacts_dir,
+        flow_file=args.flow_file,
+        reduction_pct=args.reduction,
+        auto_mode=args.auto,
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+File: src\xai\explainer.py
+================================================================================
+
+"""
+NIDS Explainable AI Module — SHAP + Natural Language Generation (NLG)
+
+This module extends the base SHAP TreeExplainer with:
+1. Human-readable Natural Language Generation (NLG) for SOC analysts.
+2. MITRE ATT&CK technique mapping based on feature contribution patterns.
+3. Structured explanation output for API consumption and terminal display.
+
+Academic Reference:
+    - Lundberg & Lee (2017). "A Unified Approach to Interpreting Model Predictions."
+    - MITRE ATT&CK Framework: https://attack.mitre.org/
+
+Author: NIDS Research Team
+"""
+
+import logging
+import numpy as np
+import shap
+import joblib
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, asdict
+
+logger = logging.getLogger("nids.xai")
+
+# ---------------------------------------------------------------------------
+# NLG Rule Engine — Maps SHAP feature contributions to human language
+# ---------------------------------------------------------------------------
+
+# Each rule maps a feature name to interpretations based on the SHAP value's
+# direction (positive SHAP = pushes toward "normal", negative = toward "anomaly"
+# in Isolation Forest's decision_function space).
+#
+# For IsolationForest TreeExplainer:
+#   - Negative SHAP value → feature pushes score DOWN → more anomalous
+#   - Positive SHAP value → feature pushes score UP → more normal
+
+NLG_RULES: Dict[str, Dict[str, dict]] = {
+    "OUT_BYTES": {
+        "anomalous": {
+            "insight": "Abnormally high outbound data volume detected",
+            "detail": "The volume of data leaving the network significantly exceeds the baseline profile. This pattern is consistent with bulk data transfer or staging.",
+            "mitre_id": "T1048",
+            "mitre_tactic": "Exfiltration",
+            "mitre_technique": "Exfiltration Over Alternative Protocol",
+            "severity": "HIGH",
+        },
+        "normal": {
+            "insight": "Outbound data volume within expected range",
+            "detail": "Egress traffic volume aligns with learned baseline behavior.",
+            "mitre_id": None,
+            "mitre_tactic": None,
+            "mitre_technique": None,
+            "severity": "LOW",
+        },
+    },
+    "OUT_PKTS": {
+        "anomalous": {
+            "insight": "Excessive outbound packet count",
+            "detail": "High-frequency outbound packet bursts typically indicate scanning, C2 beaconing, or flood-based exfiltration.",
+            "mitre_id": "T1071",
+            "mitre_tactic": "Command and Control",
+            "mitre_technique": "Application Layer Protocol",
+            "severity": "HIGH",
+        },
+        "normal": {
+            "insight": "Outbound packet rate within baseline",
+            "detail": "Packet transmission rate matches normal operational patterns.",
+            "mitre_id": None,
+            "mitre_tactic": None,
+            "mitre_technique": None,
+            "severity": "LOW",
+        },
+    },
+    "DST_TO_SRC_SECOND_BYTES": {
+        "anomalous": {
+            "insight": "Anomalous reverse-direction data flow detected",
+            "detail": "Unusually high data volume flowing from destination back to source. This may indicate data retrieval from a compromised asset or C2 response payload.",
+            "mitre_id": "T1105",
+            "mitre_tactic": "Command and Control",
+            "mitre_technique": "Ingress Tool Transfer",
+            "severity": "HIGH",
+        },
+        "normal": {
+            "insight": "Reverse data flow within baseline",
+            "detail": "Return traffic volume consistent with normal request-response patterns.",
+            "mitre_id": None,
+            "mitre_tactic": None,
+            "mitre_technique": None,
+            "severity": "LOW",
+        },
+    },
+    "NUM_PKTS_UP_TO_128_BYTES": {
+        "anomalous": {
+            "insight": "High volume of small packets detected",
+            "detail": "Excessive small-packet traffic is a hallmark of DDoS amplification, SYN floods, or protocol-based reconnaissance scanning.",
+            "mitre_id": "T1498",
+            "mitre_tactic": "Impact",
+            "mitre_technique": "Network Denial of Service",
+            "severity": "CRITICAL",
+        },
+        "normal": {
+            "insight": "Small packet ratio within baseline",
+            "detail": "TCP ACK/control packet frequency is consistent with normal operations.",
+            "mitre_id": None,
+            "mitre_tactic": None,
+            "mitre_technique": None,
+            "severity": "LOW",
+        },
+    },
+    "MIN_TTL": {
+        "anomalous": {
+            "insight": "Anomalous minimum TTL value",
+            "detail": "Unusual TTL floor may indicate spoofed packets, tunneling, or traffic from unexpected network distances.",
+            "mitre_id": "T1090",
+            "mitre_tactic": "Command and Control",
+            "mitre_technique": "Proxy",
+            "severity": "MEDIUM",
+        },
+        "normal": {
+            "insight": "TTL minimum within expected range",
+            "detail": "Minimum TTL value consistent with known network topology.",
+            "mitre_id": None,
+            "mitre_tactic": None,
+            "mitre_technique": None,
+            "severity": "LOW",
+        },
+    },
+    "MAX_TTL": {
+        "anomalous": {
+            "insight": "Anomalous maximum TTL value",
+            "detail": "Elevated TTL ceiling may indicate forged packets or multi-hop evasion chains.",
+            "mitre_id": "T1090.003",
+            "mitre_tactic": "Command and Control",
+            "mitre_technique": "Multi-hop Proxy",
+            "severity": "MEDIUM",
+        },
+        "normal": {
+            "insight": "TTL maximum within expected range",
+            "detail": "Maximum TTL aligns with standard operating system defaults.",
+            "mitre_id": None,
+            "mitre_tactic": None,
+            "mitre_technique": None,
+            "severity": "LOW",
+        },
+    },
+    "SHORTEST_FLOW_PKT": {
+        "anomalous": {
+            "insight": "Anomalous minimum packet size in flow",
+            "detail": "Unexpectedly small packets may indicate crafted probe packets or protocol manipulation attacks.",
+            "mitre_id": "T1046",
+            "mitre_tactic": "Discovery",
+            "mitre_technique": "Network Service Scanning",
+            "severity": "MEDIUM",
+        },
+        "normal": {
+            "insight": "Minimum packet size within expected range",
+            "detail": "Smallest packet size in flow is consistent with standard protocol headers.",
+            "mitre_id": None,
+            "mitre_tactic": None,
+            "mitre_technique": None,
+            "severity": "LOW",
+        },
+    },
+    "LONGEST_FLOW_PKT": {
+        "anomalous": {
+            "insight": "Anomalous maximum packet size in flow",
+            "detail": "Oversized packets may indicate buffer overflow exploitation attempts or data smuggling via MTU manipulation.",
+            "mitre_id": "T1190",
+            "mitre_tactic": "Initial Access",
+            "mitre_technique": "Exploit Public-Facing Application",
+            "severity": "HIGH",
+        },
+        "normal": {
+            "insight": "Maximum packet size within expected range",
+            "detail": "Largest packet in flow is within standard MTU boundaries.",
+            "mitre_id": None,
+            "mitre_tactic": None,
+            "mitre_technique": None,
+            "severity": "LOW",
+        },
+    },
+    "MIN_IP_PKT_LEN": {
+        "anomalous": {
+            "insight": "Anomalous minimum IP packet length",
+            "detail": "Minimal IP datagrams may indicate crafted packets used in OS fingerprinting or firewall probing.",
+            "mitre_id": "T1018",
+            "mitre_tactic": "Discovery",
+            "mitre_technique": "Remote System Discovery",
+            "severity": "MEDIUM",
+        },
+        "normal": {
+            "insight": "Minimum IP packet length within baseline",
+            "detail": "IP datagram sizes are consistent with standard protocol behavior.",
+            "mitre_id": None,
+            "mitre_tactic": None,
+            "mitre_technique": None,
+            "severity": "LOW",
+        },
+    },
+    "MAX_IP_PKT_LEN": {
+        "anomalous": {
+            "insight": "Anomalous maximum IP packet length",
+            "detail": "Large IP datagrams may indicate payload smuggling, tunneling, or fragmentation evasion attacks.",
+            "mitre_id": "T1572",
+            "mitre_tactic": "Command and Control",
+            "mitre_technique": "Protocol Tunneling",
+            "severity": "HIGH",
+        },
+        "normal": {
+            "insight": "Maximum IP packet length within baseline",
+            "detail": "Largest IP datagram fits within expected protocol parameters.",
+            "mitre_id": None,
+            "mitre_tactic": None,
+            "mitre_technique": None,
+            "severity": "LOW",
+        },
+    },
+}
+
+
+@dataclass
+class FeatureExplanation:
+    """Structured explanation for a single feature's SHAP contribution."""
+    feature_name: str
+    feature_value: float
+    shap_value: float
+    contribution_direction: str  # "anomalous" or "normal"
+    rank: int                    # 1 = most influential
+    insight: str
+    detail: str
+    severity: str
+    mitre_id: Optional[str] = None
+    mitre_tactic: Optional[str] = None
+    mitre_technique: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class ExplanationReport:
+    """Complete SHAP + NLG explanation for one flow analysis."""
+    shap_base_value: float
+    total_features: int
+    top_contributor: str
+    explanations: List[dict]
+    summary: str  # One-line human-readable summary
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+# ---------------------------------------------------------------------------
+# SHAP Explainer with NLG
+# ---------------------------------------------------------------------------
+
+class NIDSExplainer:
+    """
+    Wraps SHAP TreeExplainer with NLG mapping for SOC-ready outputs.
+
+    Usage:
+        explainer = NIDSExplainer.from_artifacts("./")
+        report = explainer.explain(X_scaled, feature_dict)
+    """
+
+    def __init__(self, model, feature_names: List[str]):
+        """
+        Args:
+            model: Trained sklearn IsolationForest.
+            feature_names: Ordered list of feature names matching training columns.
+        """
+        self.tree_explainer = shap.TreeExplainer(model)
+        self.feature_names = feature_names
+        logger.info(f"SHAP TreeExplainer initialized for {len(feature_names)} features.")
+
+    @classmethod
+    def from_artifacts(cls, artifacts_dir: str = ".") -> "NIDSExplainer":
+        """Factory method to load model and features from disk."""
+        base = Path(artifacts_dir)
+        model = joblib.load(base / "isolation_forest_model.pkl")
+        features = joblib.load(base / "top_features.pkl")
+        return cls(model, features)
+
+    def compute_shap_values(self, X_scaled: np.ndarray) -> Tuple[np.ndarray, float]:
+        """
+        Compute raw SHAP values for a scaled feature vector.
+
+        Args:
+            X_scaled: Scaled 2D numpy array (1, n_features).
+
+        Returns:
+            (shap_values_1d, base_value)
+        """
+        X_scaled = np.atleast_2d(X_scaled)
+        shap_values = self.tree_explainer.shap_values(X_scaled)
+
+        # Handle varying SHAP output shapes across versions
+        if isinstance(shap_values, list):
+            current_shap = shap_values[0].flatten()
+        elif len(shap_values.shape) == 3:
+            current_shap = shap_values[0, :, 0]
+        else:
+            current_shap = shap_values.flatten()
+
+        ev = self.tree_explainer.expected_value
+        if isinstance(ev, np.ndarray):
+            base_value = float(ev.flat[0])
+        else:
+            base_value = float(ev)
+
+        return current_shap, base_value
+
+    def explain(self, X_scaled: np.ndarray,
+                feature_values: Dict[str, float] = None,
+                top_k: int = 5) -> ExplanationReport:
+        """
+        Generate a full SHAP + NLG explanation report.
+
+        Args:
+            X_scaled: Scaled feature vector (1, n_features).
+            feature_values: Original (unscaled) feature values as {name: value}.
+            top_k: Number of top contributors to include in the report.
+
+        Returns:
+            ExplanationReport with ranked, NLG-enriched feature explanations.
+        """
+        shap_values, base_value = self.compute_shap_values(X_scaled)
+
+        # Rank features by absolute SHAP contribution
+        abs_shap = np.abs(shap_values)
+        ranked_indices = np.argsort(abs_shap)[::-1]
+
+        explanations: List[FeatureExplanation] = []
+
+        for rank, idx in enumerate(ranked_indices[:top_k], start=1):
+            feat_name = self.feature_names[idx]
+            shap_val = float(shap_values[idx])
+            feat_val = float(feature_values.get(feat_name, 0.0)) if feature_values else 0.0
+
+            # Negative SHAP → pushes toward anomaly
+            direction = "anomalous" if shap_val < 0 else "normal"
+
+            # Look up NLG rule
+            rule = NLG_RULES.get(feat_name, {}).get(direction, {})
+
+            explanation = FeatureExplanation(
+                feature_name=feat_name,
+                feature_value=round(feat_val, 4),
+                shap_value=round(shap_val, 6),
+                contribution_direction=direction,
+                rank=rank,
+                insight=rule.get("insight", f"{feat_name} contributed toward {direction}"),
+                detail=rule.get("detail", "No detailed mapping available."),
+                severity=rule.get("severity", "UNKNOWN"),
+                mitre_id=rule.get("mitre_id"),
+                mitre_tactic=rule.get("mitre_tactic"),
+                mitre_technique=rule.get("mitre_technique"),
+            )
+            explanations.append(explanation)
+
+        # Build one-line summary from the top contributor
+        top = explanations[0] if explanations else None
+        if top and top.contribution_direction == "anomalous":
+            summary = (
+                f"Primary anomaly driver: {top.feature_name} "
+                f"(SHAP={top.shap_value:+.4f}) → {top.insight}"
+            )
+            if top.mitre_id:
+                summary += f" [MITRE {top.mitre_id}]"
+        else:
+            summary = "Flow behavior consistent with baseline — no significant anomaly drivers."
+
+        return ExplanationReport(
+            shap_base_value=round(base_value, 6),
+            total_features=len(self.feature_names),
+            top_contributor=top.feature_name if top else "N/A",
+            explanations=[e.to_dict() for e in explanations],
+            summary=summary,
+        )
+
+    def get_shap_dict(self, X_scaled: np.ndarray) -> Dict[str, float]:
+        """Simple {feature_name: shap_value} dictionary (backward compatible)."""
+        shap_values, _ = self.compute_shap_values(X_scaled)
+        return {
+            name: round(float(val), 6)
+            for name, val in zip(self.feature_names, shap_values)
+        }
+
+
+================================================================================
+File: src\xai\__init__.py
+================================================================================
+
+# src.xai package init
+
+

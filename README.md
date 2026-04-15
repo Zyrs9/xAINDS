@@ -25,19 +25,19 @@ Proje, kavramların (Data Plane, ML, XAI, API) birbirinden kesin sınırlarla ay
 Sistemdeki kritik dosyaların birbirleriyle nasıl bir yaşam döngüsü içerisinde çalıştığı aşağıda açıklanmıştır:
 
 ### A) Ağ Veri Düzlemi (Data Plane)
-*   **`src/ebpf/flow_tracker.c`**: Ağ kartına (NIC) tutunan bir XDP C programıdır. Paketler henüz işletim sistemine (Linux Kernel) girmeden onları yakalar, UNSW-NB15 veri setine uygun 10 istatistiksel özelliği saniyede milyonlarca paket hızında (Tel hızı - Wire speed) hesaplar ve bir Ring Buffer üzerinden User-Space'e iletir.
-*   **`src/ebpf/user_space.py`**: C programından gelen verileri dinleyen Python Köprüsü (Bridge). BCC (BPF Compiler Collection) kütüphanesini kullanarak Kernel'deki C struct verilerini alır, Numpy dizisine çevirir ve anlık olarak `engine.py` dosyasına gönderir.
+*   **`src/ebpf/flow_tracker.c`**: Ağ kartına (NIC) tutunan XDP C programı. DDoS taşkınlarına (SYN flood) karşı korumalı `BPF_MAP_TYPE_LRU_HASH` mimarisiyle saniyede milyonlarca paket hızında 10 istatistiksel özelliği hesaplar. *(Not: XDP seviyesinde IP de-fragmentation desteklenmediğinden, parçalanmış paket saldırıları bilinen bir zafiyettir (Limitation).*
+*   **`src/ebpf/user_space.py`**: Zero-RTT kuralı gereği ML Çıkarımını (Inference) asıl yapan Python köprüsü. Elde edilen analiz (`DetectionResult`) raporlarını asenkron (Thread+Queue) olarak API'ye (Control Plane) ileterek çekirdeğin paket okumasını senkron ağ G/Ç I/O'su ile bloke etmekten korur.
 
 ### B) Makine Öğrenmesi (Machine Learning Core)
 *   **`src/ml/train_baseline.py`**: Geliştiricinin bir kez çalıştırdığı eğitim betiği. `NF-UNSW-NB15-v2.csv` veri setini okur, Random Forest ile en önemli 10 özelliği seçer, İzolasyon Ormanı (Isolation Forest) modelini eğitir. Siber güvenlikte False Negative (atağı kaçırma) cezası False Positive'den yüksek olduğu için (1'e 10 kuralı) Maliyet Duyarlı Threshold (Eşik) hesaplar ve `.pkl` dosyalarını kök dizine kaydeder.
-*   **`src/ml/engine.py`**: Gerçek zamanlı (Live-inference) tahmin motoru. `user_space.py` veya `server.py` tarafından beslenir. Ayrıca üst üste gelen paketlerin uyarı yorgunluğunu engellemek için (Alert Fatigue) `SpikeDetector` mekanizması barındırır.
+*   **`src/ml/engine.py`**: Gerçek zamanlı (Live-inference) tahmin motoru. Paket seviyesinde uyarı yorgunluğunu engellemek için tasarlanmış, O(1) hesapsal maliyete sahip (Running Sum/Variance) ve bellek sızıntısını engelleyen `deque` altyapılı `SpikeDetector` mekanizması barındırır.
 
 ### C) Açıklanabilirlik (Explainable AI - XAI)
 *   **`src/xai/explainer.py`**: Makine öğrenmesinden çıkan kararın arkasındaki nedeni arar. SHAP (SHapley Additive exPlanations) kullanılarak hangi özelliğin anomaliteye ne kadar etki ettiği hesaplanır. Doğal Dil Üretimi (NLG) motoru ve **MITRE ATT&CK** veritabanı eşleştirmesi ile SHAP değerlerini *(örn: T1048 - Exfiltration)* SOC analisti için insan diline çevirir.
 *   **`src/xai/counterfactual_demo.py`**: Projenin Masterpiece (Sanat Eseri) dosyasıdır. Jürinin "Bu model gerçekten olayları anlıyor mu, yoksa ezberledi mi?" sorusunu yanıtlar. Modelin anomalite kararı kıldığı bir ağ trafiğindeki en baskın özelliği (Örn: OUT_BYTES) bulur. Kullanıcıdan bu sayıyı yapay olarak %50 düşürmesini ister. Yeni simülasyonda kararın ANOMALY'den NORMAL'e döndüğünü matematiksel olarak ispatlar (Causality Proven).
 
-### D) Altyapı ve Sunum
-*   **`src/api/server.py`**: Tüm sistemin bulut sekansı. Dış dünyadan JSON formatında trafik kabul edebilen, model kararlarını dışarı açan ve `/explain` rotası ile MITRE raporlarını dışa aktaran modern bir FastAPI uygulaması.
+### D) Altyapı ve Sunum (Control Plane)
+*   **`src/api/server.py`**: Tüm sistemin Control Plane (Kontrol Düzlemi) ayağı. Ayrık beyin (Split-Brain) yaşamamak adına ML çıkarım motorunu asla çalıştırmaz, sadece User-Space'den gelen tespit raporlarını kabul eder. Depolama, loglama ve `/explain` (SHAP XAI) raporlarını web arayüzüne sunma işlemlerini yönetir.
 *   **`benchmark/metrics_collector.py` & `traffic_replay.sh`**: Canlı bir deneme ortamında (PCAP dosyasını tekrar oynatarak) `nvp_baseline` ile yeni eBPF mimarisinin CPU/RAM tüketimlerini milisaniyelik boyutta toplayıp, makale grafikleri için `.csv` formatında dışarı veren sistem.
 *   **`Makefile`**: Bütün sistemi komut satırı tek satırlık komutlarla (örn: `make train`, `make deploy`) yönetmeyi sağlayan orkestratör betik.
 
@@ -86,10 +86,12 @@ Sistem eBPF kullandığı için gereksinimleri platformlara göre değişiklik g
 Bu modüller şu anda başarıyla çalışsa da projenin "Ürün" (Product) seviyesine gelmesi ve makalenin gücünü katlaması için şu adımlar planlanmaktadır:
 
 - [ ] **Görsel Ön Yüz (Frontend Dashboard):**
-  - **Açıklama:** Terminal çıktılarını ve API üzerindeki verileri anlık grafiklere (Chart.js / Recharts) dökecek olan şık bir Next.js veya React web arayüzü yazılması.
+  - **Açıklama:** Terminal çıktılarını ve API üzerindeki verileri anlık grafiklere (Chart.js / Recharts) dökecek olan şık bir Next.js veya React web arayüzü yazılması. 
+  - **Tercih Edilen Teknoloji:** Vanilla JS : otherwise Next.js/React is over engineering.
   - **Amacı:** MITRE ATT&CK matris eşleşmelerinin ve SHAP değerlerinin jüri/kullanıcıya görsel şov eşliğinde gösterilmesi.
 - [ ] **Kalıcı Loglama (PostgreSQL / SQLite Storage):**
   - **Açıklama:** Belirlenen uyarıların, maliyet kaybı istatistiklerinin salt API belleğinden çıkarılıp ACID prensipleriyle kalıcı bir veritabanlarına işlenmesi.
+  - **Tercih Edilen Teknoloji:** SQLite : otherwise PostgreSQL is over engineering.
   - **Amacı:** Geriye dönük sorgulama (Querying) yapılabilmesi ve bir siber olay tepki (Incident Response) modülü yazılması için altyapı hazırlanması.
 - [ ] **Grafik Üreteçleri (Matplotlib Integration):**
   - **Açıklama:** `benchmark/metrics_collector.py` ve SHAP değerlerinden çıkan matematiksel hesaplamaları doğrudan PDF üzerinde basılabilecek LaTeX veya PGFPlots grafikleri şeklinde dışa aktaran script'in modüle bağlanması.

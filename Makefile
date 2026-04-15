@@ -15,7 +15,7 @@
 #   make clean          — Remove build artifacts
 # ==============================================================
 
-.PHONY: install train compile-ebpf api demo build deploy benchmark \
+.PHONY: install train api demo build deploy benchmark \
         stop clean test offline-test help
 
 # Variables
@@ -32,7 +32,6 @@ help:
 	@echo "  ─────────────────────────────────────────────────"
 	@echo "  make install        Install Python dependencies"
 	@echo "  make train          Train Isolation Forest on UNSW-NB15"
-	@echo "  make compile-ebpf   Compile eBPF/XDP C program"
 	@echo "  make api            Start FastAPI dev server"
 	@echo "  make demo           Run counterfactual SHAP demo"
 	@echo "  make offline-test   Test eBPF pipeline without kernel"
@@ -47,16 +46,6 @@ help:
 install:
 	$(PIP) install -r requirements.txt
 
-# ── Phase 1: eBPF Compilation ─────────────────────────────────
-compile-ebpf:
-	@echo "Compiling eBPF/XDP program..."
-	clang -O2 -g -target bpf \
-		-D__TARGET_ARCH_x86 \
-		-I/usr/include \
-		-I/usr/include/x86_64-linux-gnu \
-		-c src/ebpf/flow_tracker.c \
-		-o src/ebpf/flow_tracker.o
-	@echo "[✔] eBPF object compiled: src/ebpf/flow_tracker.o"
 
 # ── Phase 2: ML Training ─────────────────────────────────────
 train:
@@ -106,5 +95,4 @@ clean:
 	@echo "Cleaning build artifacts..."
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -name "*.pyc" -delete 2>/dev/null || true
-	rm -f src/ebpf/flow_tracker.o
 	@echo "[✔] Clean complete."

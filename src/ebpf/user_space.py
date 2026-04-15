@@ -35,6 +35,8 @@ import argparse
 import ctypes as ct
 from pathlib import Path
 from typing import Optional, Callable
+import threading
+import queue
 
 # Fix Windows terminal encoding
 if sys.platform == "win32":
@@ -129,15 +131,35 @@ class FlowProcessor:
         self.flows_processed = 0
         self.anomalies_detected = 0
 
-        # Optional: HTTP client for forwarding to FastAPI
-        self._session = None
+        # Queued background worker for Fast API forwarding
         if api_url:
+            self._queue = queue.Queue(maxsize=100000)
+            self._api_worker = threading.Thread(target=self._worker_loop, daemon=True)
+            self._api_worker.start()
+        else:
+            self._queue = None
+
+    def _worker_loop(self):
+        try:
+            import requests
+            session = requests.Session()
+            session.headers.update({"Content-Type": "application/json"})
+        except ImportError:
+            logger.warning("requests library not available. API forwarding disabled.")
+            return
+
+        while True:
             try:
-                import requests
-                self._session = requests.Session()
-                self._session.headers.update({"Content-Type": "application/json"})
-            except ImportError:
-                logger.warning("requests library not available. API forwarding disabled.")
+                payload = self._queue.get()
+                session.post(
+                    f"{self.api_url}/analyze",
+                    json=payload,
+                    timeout=2,
+                )
+                self._queue.task_done()
+            except Exception:
+                # Silently ignore network errors to keep loop alive
+                pass
 
     def flow_to_numpy(self, event: FlowExport) -> np.ndarray:
         """
@@ -220,16 +242,12 @@ class FlowProcessor:
             f"{flow_id}"
         )
 
-        # Forward to API if configured
-        if self._session and self.api_url:
+        # Forward to API via background thread
+        if self._queue is not None:
             try:
-                self._session.post(
-                    f"{self.api_url}/analyze",
-                    json={"features": feature_dict},
-                    timeout=1,
-                )
-            except Exception:
-                pass  # Non-blocking: don't stall the data plane
+                self._queue.put_nowait(result.to_dict())
+            except queue.Full:
+                pass  # Drop payload if API is too slow, protecting eBPF memory
 
     def print_stats(self):
         """Print processing statistics."""

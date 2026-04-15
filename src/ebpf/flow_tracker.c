@@ -24,6 +24,15 @@
  * Note: When used with BCC (Python), BCC compiles this inline — no manual
  *       compilation needed. The standalone compile is for libbpf deployments.
  *
+ * LIMITATION (Fragmented Packet Attacks):
+ *   XDP operates before the kernel's network stack can reassemble IP fragments.
+ *   Consequently, this flow tracker processes each fragment as an independent
+ *   packet. An attacker could exploit this by sending fragmented malicious
+ *   vectors (e.g., 1500-byte attack split into 64-byte fragments), causing
+ *   the ML model to classify them as "innocent small packets". IP 
+ *   de-fragmentation is not supported at the XDP level and remains a known
+ *   blind spot for future research (Limitations section of thesis).
+ *
  * Author: NIDS Research Team
  * License: GPL-2.0 (required for eBPF programs)
  */
@@ -131,7 +140,7 @@ struct flow_export {
 
 /* Hash map: flow_key → flow_state */
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, MAX_FLOWS);
     __type(key, struct flow_key);
     __type(value, struct flow_state);

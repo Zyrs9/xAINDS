@@ -18,6 +18,7 @@ import json
 import logging
 import numpy as np
 import joblib
+import threading
 from pathlib import Path
 from collections import deque
 from dataclasses import dataclass, field, asdict
@@ -209,12 +210,16 @@ class SpikeDetector:
         self.window_seconds = window_seconds
         self.sigma_multiplier = sigma_multiplier
         self._history: deque = deque()
+        self._running_sum = 0.0
+        self._running_sq_sum = 0.0
 
     def _evict_expired(self, now: float) -> None:
         """Remove entries older than the rolling window."""
         cutoff = now - self.window_seconds
         while self._history and self._history[0][0] < cutoff:
-            self._history.popleft()
+            _, old_intensity = self._history.popleft()
+            self._running_sum -= old_intensity
+            self._running_sq_sum -= (old_intensity * old_intensity)
 
     def record_and_classify(self, score: float, is_anomaly: bool,
                              timestamp: float = None) -> Tuple[AlertLevel, Dict]:
@@ -237,12 +242,15 @@ class SpikeDetector:
         intensity = -score  # Higher intensity = more anomalous
 
         self._history.append((now, intensity))
+        self._running_sum += intensity
+        self._running_sq_sum += (intensity * intensity)
 
         # Calculate rolling statistics
-        if len(self._history) < 3:
+        n = len(self._history)
+        if n < 3:
             # Not enough data for meaningful statistics
             spike_info = {
-                "window_size": len(self._history),
+                "window_size": n,
                 "mean": float(intensity),
                 "std": 0.0,
                 "spike_threshold": float(intensity),
@@ -251,9 +259,10 @@ class SpikeDetector:
             level = AlertLevel.WARNING if is_anomaly else AlertLevel.NORMAL
             return level, spike_info
 
-        intensities = np.array([h[1] for h in self._history])
-        mean = float(np.mean(intensities))
-        std = float(np.std(intensities))
+        mean = float(self._running_sum / n)
+        # Variance calculation with fallback for numerical precision
+        var = (self._running_sq_sum - (self._running_sum ** 2) / n) / n
+        std = float(max(0, var) ** 0.5)
         spike_threshold = mean + (self.sigma_multiplier * std)
 
         is_spike = intensity > spike_threshold
@@ -306,7 +315,8 @@ class NIDSEngine:
         self.cost_calculator = CostSensitiveThreshold(cost_fp, cost_fn)
         self.spike_detector = SpikeDetector(window_seconds=window_seconds)
         self._initialized = False
-        self._alert_log: List[DetectionResult] = []
+        self._alert_log: deque = deque(maxlen=100000)
+        self._log_lock = threading.Lock()
 
     def load_artifacts(self,
                        model_path: str = None,
@@ -401,14 +411,17 @@ class NIDSEngine:
             spike_info=spike_info,
         )
 
-        self._alert_log.append(result)
+        with self._log_lock:
+            self._alert_log.append(result)
 
         return result
 
     def get_recent_alerts(self, n: int = 50,
                           level_filter: str = None) -> List[dict]:
         """Retrieve recent alerts, optionally filtered by level."""
-        alerts = self._alert_log[-n:]
+        with self._log_lock:
+            # deque sliding needs to be converted to list
+            alerts = list(self._alert_log)[-n:]
         if level_filter:
             alerts = [a for a in alerts if a.alert_level == level_filter]
         return [a.to_dict() for a in alerts]
