@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+events.jsonl
+api.log
+
+NF-CSE-CIC-IDS2018-v2.csv
+evaluation_outputs/
