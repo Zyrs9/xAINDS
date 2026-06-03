@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from predict import load_metadata, predict_records
@@ -11,6 +11,8 @@ from predict import load_metadata, predict_records
 
 BASE_DIR = Path(__file__).resolve().parent
 EVENTS_PATH = BASE_DIR / "events.jsonl"
+EXPLAINABILITY_DIR = BASE_DIR / "explainability"
+FEATURE_IMPORTANCE_PATH = EXPLAINABILITY_DIR / "feature_importance.csv"
 
 app = FastAPI(
     title="Explainable Lightweight NIDS API",
@@ -64,12 +66,53 @@ def read_events(limit=100):
     return events
 
 
+def read_feature_importance(limit=10):
+    if not FEATURE_IMPORTANCE_PATH.exists():
+        return []
+    rows = []
+    lines = FEATURE_IMPORTANCE_PATH.read_text(encoding="utf-8").splitlines()
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        parts = line.split(",", 1)
+        if len(parts) != 2:
+            continue
+        try:
+            rows.append({"feature": parts[0], "mean_abs_shap": float(parts[1])})
+        except ValueError:
+            continue
+    return rows[:limit]
+
+
 @app.get("/events")
 def events(limit: int = 100):
     return {
         "count": len(read_events(limit)),
         "events": read_events(limit),
     }
+
+
+@app.get("/explainability/feature-importance")
+def feature_importance(limit: int = 10):
+    return {
+        "count": len(read_feature_importance(limit)),
+        "features": read_feature_importance(limit),
+    }
+
+
+@app.get("/explainability/assets/{filename}")
+def explainability_asset(filename: str):
+    allowed = {
+        "shap_summary.png",
+        "shap_feature_importance.png",
+        "feature_importance.csv",
+    }
+    if filename not in allowed:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    path = EXPLAINABILITY_DIR / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return FileResponse(path)
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -135,6 +178,12 @@ def dashboard():
       grid-template-columns: 1.2fr 0.8fr;
       gap: 14px;
     }}
+    .explainability {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 14px;
+    }}
     .panel {{ padding: 14px; overflow: hidden; }}
     h2 {{ font-size: 15px; margin: 0 0 12px; }}
     table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
@@ -162,9 +211,19 @@ def dashboard():
     }}
     .bar.anomaly {{ background: var(--bad); }}
     .empty {{ color: var(--muted); padding: 12px 0; }}
+    .explainability img {{
+      width: 100%;
+      max-height: 420px;
+      object-fit: contain;
+      background: #020617;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+    }}
+    .note {{ color: var(--muted); font-size: 13px; line-height: 1.45; }}
     @media (max-width: 900px) {{
       .grid {{ grid-template-columns: repeat(2, 1fr); }}
       .panels {{ grid-template-columns: 1fr; }}
+      .explainability {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
@@ -201,6 +260,22 @@ def dashboard():
         <div class="timeline" id="timeline"></div>
         <h2 style="margin-top:18px">Top Sources</h2>
         <table><tbody id="topSources"></tbody></table>
+      </div>
+    </section>
+    <section class="explainability">
+      <div class="panel">
+        <h2>Global SHAP Summary</h2>
+        <img src="/explainability/assets/shap_summary.png" alt="Global SHAP summary">
+        <p class="note">Global SHAP analysis explains the model's overall behavior across evaluation samples. It is separate from per-event local XAI.</p>
+      </div>
+      <div class="panel">
+        <h2>SHAP Feature Importance</h2>
+        <img src="/explainability/assets/shap_feature_importance.png" alt="SHAP feature importance">
+        <h2 style="margin-top:18px">Top Global Features</h2>
+        <table>
+          <thead><tr><th>Feature</th><th>Mean |SHAP|</th></tr></thead>
+          <tbody id="featureImportance"></tbody>
+        </table>
       </div>
     </section>
   </main>
@@ -271,7 +346,20 @@ def dashboard():
         topBody.appendChild(row);
       }});
     }}
+    async function refreshFeatureImportance() {{
+      const response = await fetch("/explainability/feature-importance?limit=10");
+      const payload = await response.json();
+      const rows = payload.features || [];
+      const body = document.getElementById("featureImportance");
+      body.innerHTML = rows.length ? "" : "<tr><td colspan='2' class='empty'>No feature importance data</td></tr>";
+      rows.forEach(item => {{
+        const row = document.createElement("tr");
+        row.innerHTML = `<td>${{item.feature}}</td><td>${{Number(item.mean_abs_shap).toFixed(4)}}</td>`;
+        body.appendChild(row);
+      }});
+    }}
     refresh();
+    refreshFeatureImportance();
     setInterval(refresh, 2000);
   </script>
 </body>

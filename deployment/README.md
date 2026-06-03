@@ -53,6 +53,14 @@ Open the dashboard from another VM or the host browser:
 http://SERVER_IP:8000/dashboard
 ```
 
+The dashboard includes a global explainability section with:
+
+- SHAP summary plot.
+- SHAP feature importance plot.
+- Top global feature importance table.
+
+These are global model interpretation artifacts, not per-event local XAI explanations.
+
 Health check:
 
 ```bash
