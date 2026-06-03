@@ -19,6 +19,13 @@ cd attack_simulations/parrot
 chmod +x *.sh
 ```
 
+Optional tools for all scenarios:
+
+```bash
+sudo apt update
+sudo apt install -y hping3 nmap curl dnsutils netcat-openbsd
+```
+
 ## Ubuntu Monitor
 
 Run the NIDS monitor on Ubuntu before generating traffic:
@@ -35,6 +42,76 @@ sudo .venv/bin/python tcpdump_monitor.py --interface eth1 --flow-timeout 3 --min
 ```
 
 ## Scenarios
+
+## Benign Scenarios
+
+These scripts generate low-volume traffic that is expected to look closer to benign behavior.
+
+### Benign Ping Check
+
+```bash
+TARGET=10.10.20.10 COUNT=5 ./benign_ping_check.sh
+```
+
+Common traits:
+
+- Low packet count.
+- Regular timing.
+- Low byte rate.
+
+### Benign HTTP Browsing
+
+Start a simple HTTP server on Debian:
+
+```bash
+python3 -m http.server 8080
+```
+
+Then run:
+
+```bash
+TARGET=10.10.20.10 PORT=8080 REQUESTS=5 DELAY_SECONDS=1 ./benign_http_browse.sh
+```
+
+Common traits:
+
+- Small number of spaced requests.
+- Moderate packet and byte rates.
+- Normal request/response behavior.
+
+### Benign DNS Lookup
+
+If a DNS service is available on the victim:
+
+```bash
+TARGET=10.10.20.10 DNS_SERVER=10.10.20.10 DOMAIN=example.local ./benign_dns_lookup.sh
+```
+
+Common traits:
+
+- Very small UDP query volume.
+- Spaced requests.
+- Low byte count.
+
+### Benign TCP Checks
+
+```bash
+TARGET=10.10.20.10 PORT=80 CONNECTIONS=5 DELAY_SECONDS=1 ./benign_tcp_handshake.sh
+```
+
+Common traits:
+
+- Few connection attempts.
+- Spaced TCP checks.
+- Low packet rate.
+
+### Benign Demo Sequence
+
+```bash
+TARGET=10.10.20.10 ./run_benign_sequence.sh
+```
+
+## Anomaly-Oriented Scenarios
 
 ### TCP SYN Burst
 
