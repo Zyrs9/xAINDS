@@ -606,12 +606,10 @@ def main():
     logger.info("Loading dataset into memory...")
     df = pd.read_csv(DATASET_PATH, usecols=use_cols)
     
-    # OVERFLOW ÇÖZÜMÜ: Tüm sütunları sayıya zorla, bozuk olanları (metin vb.) NaN yap
     for col in df.columns:
         if col != TARGET_COL:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # Bellek yönetimi için float64 -> float32 dönüşümü (Sayısal sınırı aşmadan)
     for col in df.columns:
         if col == TARGET_COL: continue
         if df[col].dtype == 'float64':
@@ -621,7 +619,6 @@ def main():
         elif df[col].dtype == 'int64':
             df[col] = pd.to_numeric(df[col], downcast='integer')
 
-    # Stratified split ile veri miktarını ayarla
     df, _ = train_test_split(df, train_size=0.10, stratify=df[TARGET_COL], random_state=42)
 
     # --------------------------------------------------
@@ -631,20 +628,15 @@ def main():
     b_df = df[df[TARGET_COL] == BENIGN_LABEL]
     a_df = df[df[TARGET_COL] == ANOMALY_LABEL]
     
-    # Sadece normal trafiği temizle, anomalilerin her biri altın değerindedir!
     b_df = b_df.drop_duplicates()
     df = pd.concat([b_df, a_df]).reset_index(drop=True)
     
-    # Gereksiz object sütunlarını at
     obj_cols = df.select_dtypes(include=['object']).columns.tolist()
     if obj_cols:
         df = df.drop(columns=obj_cols)
         
-    # SONSUZ DEĞERLERİ TEMİZLE (Sayısal Stabilite İçin)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     
-    # ÖNEMLİ: dropna() yerine sayısal sütunları medyan ile doldurmak 
-    # bazen daha fazla anomaliyi sistemde tutar. Ama dropna kullanacaksan:
     df.dropna(inplace=True) 
     
     gc.collect()
@@ -674,21 +666,17 @@ def main():
     dur_log = np.log1p(df.get('FLOW_DURATION_MILLISECONDS', 0).astype(np.float64))
     df['Flow_Intensity'] = in_log + out_log - dur_log
     
-    # INFINITY TEMİZLİĞİ (SİLMEK YERİNE DOLDUR)
+    # INFINITY TEMİZLİĞİ
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     
-    # Sayısal sütunları yakala
     numeric_cols = df.select_dtypes(include=[np.number]).columns.drop([TARGET_COL], errors='ignore')
     
-    # NaN değerleri medyan ile doldur (Satırları silmiyoruz ki anomaliler gitmesin!)
     df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].median())
     
-    # Çok uç değerleri baskıla (Scaling öncesi stabilite için)
     for col in numeric_cols:
-        upper_limit = df[col].quantile(0.999) # En üst %0.1'lik kısmı kırp
+        upper_limit = df[col].quantile(0.999)
         df[col] = df[col].clip(upper=upper_limit)
 
-    # Varyansı sıfır olanları at
     variances = df[numeric_cols].var()
     drop_var = variances[variances <= 0.0].index
     if len(drop_var) > 0:

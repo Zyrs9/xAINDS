@@ -3,6 +3,9 @@ __pycache__/
 .venv/
 events.jsonl
 api.log
+.env
+deployment/.env
+deployment/reports/
 
 NF-CSE-CIC-IDS2018-v2.csv
 evaluation_outputs/

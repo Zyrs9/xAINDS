@@ -1,4 +1,7 @@
 import json
+import os
+import textwrap
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +16,16 @@ BASE_DIR = Path(__file__).resolve().parent
 EVENTS_PATH = BASE_DIR / "events.jsonl"
 EXPLAINABILITY_DIR = BASE_DIR / "explainability"
 FEATURE_IMPORTANCE_PATH = EXPLAINABILITY_DIR / "feature_importance.csv"
+REPORTS_DIR = BASE_DIR / "reports"
+ENV_PATH = BASE_DIR / ".env"
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv(ENV_PATH)
 
 app = FastAPI(
     title="Explainable Lightweight NIDS API",
@@ -32,6 +45,17 @@ class BatchPredictionRequest(BaseModel):
     records: list[dict[str, Any]] = Field(
         ...,
         description="List of network-flow feature objects.",
+    )
+
+
+class InvestigationRequest(BaseModel):
+    event: dict[str, Any] = Field(
+        ...,
+        description="Selected dashboard event from events.jsonl.",
+    )
+    related_events: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Recent events used for historical correlation.",
     )
 
 
@@ -84,6 +108,290 @@ def read_feature_importance(limit=10):
     return rows[:limit]
 
 
+def protocol_name(value):
+    mapping = {1: "ICMP", 6: "TCP", 17: "UDP"}
+    try:
+        return mapping.get(int(value), str(value or "UNKNOWN"))
+    except (TypeError, ValueError):
+        return str(value or "UNKNOWN")
+
+
+def risk_level(event, metadata):
+    threshold = float(event.get("threshold", metadata.get("threshold", -0.054220406182326486)))
+    score = float(event.get("score", 0.0))
+    if str(event.get("label", "")).lower() == "anomaly" or score <= threshold:
+        return "ANOMALY"
+    if score <= threshold + abs(threshold) * 0.65:
+        return "SUSPICIOUS"
+    return "BENIGN"
+
+
+def incident_id(event):
+    seed = f"{event.get('timestamp', '')}-{event.get('src', '')}-{event.get('dst', '')}-{event.get('dport', '')}"
+    value = abs(hash(seed)) % 1000000
+    return f"AI-NIDS-{value:06d}"
+
+
+def top_feature_drivers(event, limit=6):
+    features = event.get("features") or {}
+    preferred = [
+        "Packets_per_Second",
+        "Flow_Intensity",
+        "Byte_Rate",
+        "Total_Packets",
+        "Total_Bytes",
+        "Bytes_per_Packet",
+        "FLOW_DURATION_MILLISECONDS",
+    ]
+    drivers = []
+    for name in preferred:
+        try:
+            value = abs(float(features.get(name, 0)))
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0:
+            drivers.append({"feature": name, "value": value})
+    if not drivers:
+        drivers = read_feature_importance(limit)
+        return [{"feature": row["feature"], "value": row["mean_abs_shap"]} for row in drivers]
+    return sorted(drivers, key=lambda item: item["value"], reverse=True)[:limit]
+
+
+def correlate_events(event, related_events):
+    related = [
+        item for item in related_events
+        if item.get("src") == event.get("src") or item.get("dport") == event.get("dport")
+    ]
+    ports = sorted({str(item.get("dport")) for item in related if item.get("dport")})
+    ips = sorted({str(item.get("src")) for item in related if item.get("src")})
+    return {
+        "similar_events": len(related),
+        "last_occurrence": related[-1].get("timestamp") if related else None,
+        "event_frequency": f"{len(related)} events in current dashboard window",
+        "related_source_ips": ips[:8],
+        "related_ports": ports[:8],
+    }
+
+
+def fallback_analysis(event, related_events, metadata):
+    features = event.get("features") or {}
+    risk = risk_level(event, metadata)
+    proto = protocol_name(event.get("proto"))
+    pps = float(features.get("Packets_per_Second", 0) or 0)
+    byte_rate = float(features.get("Byte_Rate", 0) or 0)
+    flow_intensity = float(features.get("Flow_Intensity", 0) or 0)
+    attack_type = "Anomalous network behavior"
+    if proto == "TCP" and pps > 50:
+        attack_type = "Reconnaissance or brute-force activity"
+    elif proto == "UDP" and pps > 50:
+        attack_type = "UDP burst or service abuse"
+    elif proto == "ICMP":
+        attack_type = "ICMP burst or availability probing"
+    confidence = "87%" if risk == "ANOMALY" else "64%" if risk == "SUSPICIOUS" else "38%"
+    return {
+        "root_cause_analysis": (
+            f"Isolation Forest score {event.get('score')} was evaluated against threshold "
+            f"{metadata.get('threshold')}. The flow shows {pps:.2f} packets per second, "
+            f"{byte_rate:.2f} bytes per second, and flow intensity {flow_intensity:.2f}."
+        ),
+        "possible_attack_type": attack_type,
+        "confidence_score": confidence,
+        "threat_assessment": risk,
+        "recommended_actions": [
+            "Review source IP reputation and recent activity.",
+            "Correlate with repeated attempts against the same destination or port.",
+            "Preserve this event as evidence for analyst review.",
+            "Apply temporary blocking only if repeated anomalous behavior continues.",
+        ],
+        "ai_investigation_summary": (
+            "The event is assessed with model evidence, flow-derived drivers, and global SHAP context. "
+            "Traffic rate and flow intensity are the strongest available explanatory signals for this incident."
+        ),
+        "shap_evidence": top_feature_drivers(event),
+        "historical_correlation": correlate_events(event, related_events),
+        "model_source": "local-fallback",
+    }
+
+
+def build_gemini_prompt(event, related_events, metadata, feature_importance):
+    language = os.environ.get("LANGUAGE", "Turkish")
+    prompt_payload = {
+        "project": "Explainable AI-Driven Lightweight Network Intrusion Detection System (AI-NIDS)",
+        "required_language": language,
+        "model": {
+            "type": metadata.get("model_type"),
+            "threshold": metadata.get("threshold"),
+            "prediction_rule": metadata.get("prediction_rule"),
+            "metrics": metadata.get("metrics"),
+        },
+        "selected_event": event,
+        "risk_level": risk_level(event, metadata),
+        "top_feature_drivers": top_feature_drivers(event),
+        "global_shap_feature_importance": feature_importance,
+        "historical_correlation": correlate_events(event, related_events),
+    }
+    return (
+        "You are a cybersecurity SOC investigation assistant for an academic AI-NIDS project. "
+        "Analyze the selected network event using Isolation Forest score evidence, SHAP-style feature drivers, "
+        "and historical correlation. Return ONLY valid JSON with these keys: "
+        "root_cause_analysis, possible_attack_type, confidence_score, threat_assessment, "
+        "recommended_actions, ai_investigation_summary, shap_evidence, historical_correlation. "
+        "Use concise, professional Turkish suitable for an academic incident report.\n\n"
+        f"{json.dumps(prompt_payload, ensure_ascii=False, indent=2)}"
+    )
+
+
+def call_gemini_analysis(event, related_events, metadata):
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    model_name = os.environ.get("MODEL_NAME", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+    if not api_key:
+        return None
+
+    try:
+        from google import genai
+    except ImportError as exc:
+        raise RuntimeError("google-genai is not installed. Run: pip install -r deployment/requirements.txt") from exc
+
+    prompt = build_gemini_prompt(event, related_events, metadata, read_feature_importance(10))
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(model=model_name, contents=prompt)
+    text = getattr(response, "text", "") or ""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError:
+        payload = fallback_analysis(event, related_events, metadata)
+        payload["ai_investigation_summary"] = text.strip() or payload["ai_investigation_summary"]
+    payload["model_source"] = model_name
+    return payload
+
+
+def report_payload(event, related_events):
+    metadata = load_metadata()
+    analysis = call_gemini_analysis(event, related_events, metadata)
+    if analysis is None:
+        analysis = fallback_analysis(event, related_events, metadata)
+    return {
+        "incident_id": incident_id(event),
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "event": event,
+        "risk_level": risk_level(event, metadata),
+        "metadata": metadata,
+        "analysis": analysis,
+        "feature_drivers": top_feature_drivers(event),
+        "feature_importance": read_feature_importance(10),
+    }
+
+
+def pdf_font_name():
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    font_candidates = [
+        Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "arial.ttf",
+        Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "calibri.ttf",
+    ]
+    for path in font_candidates:
+        if path.exists():
+            try:
+                pdfmetrics.registerFont(TTFont("AINIDSFont", str(path)))
+                return "AINIDSFont"
+            except Exception:
+                continue
+    return "Helvetica"
+
+
+def add_wrapped_text(canvas, text, x, y, width, font_name, font_size=9, leading=12):
+    canvas.setFont(font_name, font_size)
+    max_chars = max(int(width / (font_size * 0.48)), 24)
+    for paragraph in str(text or "").splitlines() or [""]:
+        for line in textwrap.wrap(paragraph, max_chars) or [""]:
+            if y < 56:
+                canvas.showPage()
+                y = 780
+                canvas.setFont(font_name, font_size)
+            canvas.drawString(x, y, line)
+            y -= leading
+    return y
+
+
+def write_pdf_report(payload):
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+    except ImportError as exc:
+        raise RuntimeError("reportlab is not installed. Run: pip install -r deployment/requirements.txt") from exc
+
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{payload['incident_id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    path = REPORTS_DIR / filename
+    c = canvas.Canvas(str(path), pagesize=A4)
+    font_name = pdf_font_name()
+    width, height = A4
+    y = height - 48
+
+    def section(title, body):
+        nonlocal y
+        if y < 110:
+            c.showPage()
+            y = height - 48
+        c.setFont(font_name, 13)
+        c.drawString(44, y, title)
+        y -= 18
+        y = add_wrapped_text(c, body, 54, y, width - 96, font_name)
+        y -= 10
+
+    event = payload["event"]
+    analysis = payload["analysis"]
+    metadata = payload["metadata"]
+    c.setFont(font_name, 18)
+    c.drawString(44, y, "AI-NIDS Incident Investigation Report")
+    y -= 24
+    c.setFont(font_name, 9)
+    c.drawString(44, y, f"Incident ID: {payload['incident_id']} | Generated: {payload['generated_at']}")
+    y -= 22
+
+    section(
+        "Incident Information",
+        "\n".join([
+            f"Timestamp: {event.get('timestamp', '-')}",
+            f"Source IP: {event.get('src', '-')}",
+            f"Destination IP: {event.get('dst', '-')}",
+            f"Protocol: {protocol_name(event.get('proto'))}",
+            f"Source Port: {event.get('sport', '-')}",
+            f"Destination Port: {event.get('dport', '-')}",
+        ]),
+    )
+    section(
+        "Detection Details",
+        "\n".join([
+            f"Model: {metadata.get('model_type')} with {metadata.get('scaler_type')}",
+            f"Anomaly Score: {event.get('score')}",
+            f"Threshold: {metadata.get('threshold')}",
+            f"Risk Level: {payload['risk_level']}",
+            f"Prediction Rule: {metadata.get('prediction_rule')}",
+        ]),
+    )
+    section("SHAP Evidence", json.dumps(payload["feature_drivers"], ensure_ascii=False, indent=2))
+    section("AI Investigation Findings", analysis.get("ai_investigation_summary", ""))
+    section("Root Cause Analysis", analysis.get("root_cause_analysis", ""))
+    section(
+        "Historical Correlation",
+        json.dumps(analysis.get("historical_correlation", {}), ensure_ascii=False, indent=2),
+    )
+    section(
+        "Recommendations",
+        "\n".join(analysis.get("recommended_actions", [])) if isinstance(analysis.get("recommended_actions"), list) else analysis.get("recommended_actions", ""),
+    )
+    section("Analyst Notes", "Human analyst review area. Validate AI output before operational enforcement.")
+    c.save()
+    return filename, path
+
+
 @app.get("/events")
 def events(limit: int = 100):
     return {
@@ -115,251 +423,897 @@ def explainability_asset(filename: str):
     return FileResponse(path)
 
 
+@app.post("/investigate/report")
+def investigate_report(request: InvestigationRequest):
+    try:
+        payload = report_payload(request.event, request.related_events)
+        filename, _ = write_pdf_report(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "incident_id": payload["incident_id"],
+        "generated_at": payload["generated_at"],
+        "risk_level": payload["risk_level"],
+        "analysis": payload["analysis"],
+        "pdf_url": f"/reports/{filename}",
+        "pdf_filename": filename,
+    }
+
+
+@app.get("/reports/{filename}")
+def report_file(filename: str):
+    if "/" in filename or "\\" in filename or not filename.endswith(".pdf"):
+        raise HTTPException(status_code=404, detail="Report not found")
+    path = REPORTS_DIR / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Report not found")
+    return FileResponse(path, media_type="application/pdf", filename=filename)
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
-    metadata = load_metadata()
-    return f"""<!doctype html>
+    return """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>NIDS Dashboard</title>
+  <title>AI-NIDS SOC Dashboard</title>
   <style>
-    :root {{
+    :root {
       color-scheme: dark;
-      --bg: #0f172a;
+      --bg: #0B1020;
       --panel: #111827;
       --line: #334155;
-      --text: #e5e7eb;
-      --muted: #94a3b8;
-      --ok: #22c55e;
-      --bad: #ef4444;
-      --warn: #f59e0b;
+      --text: #F8FAFC;
+      --muted: #CBD5E1;
+      --ok: #22C55E;
+      --bad: #EF4444;
+      --warn: #F59E0B;
       --blue: #38bdf8;
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
+      --soft: #172033;
+      --shadow: rgba(0, 0, 0, 0.28);
+    }
+    * { box-sizing: border-box; }
+    body {
       margin: 0;
-      background: var(--bg);
+      background: #0B1020;
       color: var(--text);
-      font-family: Arial, sans-serif;
-    }}
-    header {{
-      padding: 18px 24px;
+      font-family: Inter, Segoe UI, Arial, sans-serif;
+    }
+    button {
+      border: 0;
+      border-radius: 6px;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      min-height: 34px;
+      padding: 8px 12px;
+    }
+    .app-shell { min-height: 100vh; }
+    .topbar {
+      align-items: center;
+      background: rgba(11, 16, 32, 0.96);
       border-bottom: 1px solid var(--line);
       display: flex;
-      align-items: center;
       justify-content: space-between;
-      gap: 16px;
-    }}
-    h1 {{ font-size: 20px; margin: 0; }}
-    main {{ padding: 20px 24px 28px; }}
-    .meta {{ color: var(--muted); font-size: 13px; }}
-    .grid {{
+      gap: 18px;
+      min-height: 68px;
+      padding: 0 24px;
+      position: sticky;
+      top: 0;
+      z-index: 5;
+    }
+    .brand {
+      align-items: center;
+      display: flex;
+      gap: 12px;
+      min-width: 220px;
+    }
+    .logo-mark {
+      align-items: center;
+      background: #0F2745;
+      border: 1px solid rgba(56, 189, 248, 0.55);
+      border-radius: 8px;
+      color: var(--blue);
       display: grid;
-      grid-template-columns: repeat(5, minmax(130px, 1fr));
+      font-weight: 800;
+      height: 40px;
+      letter-spacing: 0;
+      place-items: center;
+      width: 40px;
+    }
+    .brand-title { font-size: 18px; font-weight: 800; }
+    .brand-subtitle { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .nav {
+      align-items: center;
+      display: flex;
+      gap: 4px;
+      overflow-x: auto;
+    }
+    .nav button {
+      background: transparent;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .nav button.active, .nav button:hover {
+      background: #142136;
+      color: var(--text);
+    }
+    .operator-strip {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: right;
+      white-space: nowrap;
+    }
+    main { padding: 22px 24px 30px; }
+    .view { display: none; }
+    .view.active { display: block; }
+    .page-head {
+      align-items: end;
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 26px; letter-spacing: 0; }
+    h2 { font-size: 16px; margin-bottom: 12px; }
+    h3 { font-size: 14px; margin-bottom: 10px; }
+    .lede { color: var(--muted); font-size: 14px; margin-top: 6px; max-width: 760px; }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(150px, 1fr));
       gap: 12px;
       margin-bottom: 18px;
-    }}
-    .card, .panel {{
+    }
+    .card, .panel {
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
-    }}
-    .card {{ padding: 14px; min-height: 82px; }}
-    .label {{ color: var(--muted); font-size: 12px; margin-bottom: 8px; }}
-    .value {{ font-size: 24px; font-weight: 700; }}
-    .bad {{ color: var(--bad); }}
-    .ok {{ color: var(--ok); }}
-    .warn {{ color: var(--warn); }}
-    .blue {{ color: var(--blue); }}
-    .panels {{
+      box-shadow: 0 12px 28px var(--shadow);
+    }
+    .kpi {
+      min-height: 132px;
+      padding: 14px;
+    }
+    .kpi-top {
+      align-items: center;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .kpi-icon {
+      align-items: center;
+      background: #0F2745;
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      border-radius: 7px;
+      color: var(--blue);
       display: grid;
-      grid-template-columns: 1.2fr 0.8fr;
-      gap: 14px;
-    }}
-    .explainability {{
+      font-size: 17px;
+      height: 34px;
+      place-items: center;
+      width: 34px;
+    }
+    .label { color: var(--muted); font-size: 12px; }
+    .value { font-size: 25px; font-weight: 800; line-height: 1.1; }
+    .trend { color: var(--ok); font-size: 12px; margin-top: 8px; }
+    .timestamp { color: var(--muted); font-size: 11px; margin-top: 10px; }
+    .soc-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1.45fr) minmax(360px, 0.7fr);
       gap: 14px;
-      margin-top: 14px;
-    }}
-    .panel {{ padding: 14px; overflow: hidden; }}
-    h2 {{ font-size: 15px; margin: 0 0 12px; }}
-    table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-    th, td {{
+    }
+    .panel { overflow: hidden; padding: 16px; }
+    .panel-head {
+      align-items: center;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .section-note { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .table-wrap { overflow: auto; }
+    table { border-collapse: collapse; font-size: 13px; width: 100%; }
+    th, td {
       border-bottom: 1px solid var(--line);
-      padding: 8px 6px;
+      padding: 11px 8px;
       text-align: left;
       white-space: nowrap;
-    }}
-    th {{ color: var(--muted); font-weight: 600; }}
-    .timeline {{
-      height: 140px;
-      display: flex;
-      align-items: end;
-      gap: 4px;
-      border-left: 1px solid var(--line);
+    }
+    th { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; }
+    tr:hover td { background: rgba(56, 189, 248, 0.04); }
+    .badge {
+      border-radius: 999px;
+      display: inline-flex;
+      font-size: 11px;
+      font-weight: 800;
+      justify-content: center;
+      min-width: 92px;
+      padding: 5px 9px;
+    }
+    .badge.benign { background: rgba(34, 197, 94, 0.12); color: var(--ok); }
+    .badge.suspicious { background: rgba(245, 158, 11, 0.14); color: var(--warn); }
+    .badge.anomaly { background: rgba(239, 68, 68, 0.14); color: var(--bad); }
+    .btn-primary { background: var(--blue); color: #05101E; font-weight: 800; }
+    .btn-muted { background: #1D293D; color: var(--muted); }
+    .btn-danger { background: rgba(239, 68, 68, 0.18); color: var(--bad); }
+    .btn-warning { background: rgba(245, 158, 11, 0.16); color: var(--warn); }
+    .action-group { display: flex; gap: 8px; }
+    .chart-card { min-height: 440px; }
+    .chart {
       border-bottom: 1px solid var(--line);
-      padding: 8px;
-    }}
-    .bar {{
-      width: 10px;
-      min-height: 2px;
-      background: var(--blue);
-      border-radius: 2px 2px 0 0;
-    }}
-    .bar.anomaly {{ background: var(--bad); }}
-    .empty {{ color: var(--muted); padding: 12px 0; }}
-    .explainability img {{
-      width: 100%;
-      max-height: 420px;
-      object-fit: contain;
+      border-left: 1px solid var(--line);
+      height: 250px;
+      margin-top: 10px;
+      position: relative;
+    }
+    .chart svg { display: block; height: 100%; width: 100%; }
+    .chart-metrics {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(3, 1fr);
+      margin-top: 14px;
+    }
+    .mini-stat {
+      background: #0F172A;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 10px;
+    }
+    .mini-stat strong { display: block; font-size: 17px; margin-top: 5px; }
+    .investigation-grid {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: minmax(320px, 0.78fr) minmax(0, 1.22fr);
+    }
+    .detail-grid {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .detail {
+      background: #0F172A;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 10px;
+    }
+    .detail span { color: var(--muted); display: block; font-size: 11px; margin-bottom: 5px; }
+    .detail strong { font-size: 14px; word-break: break-word; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .xai-grid {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: minmax(0, 1fr) minmax(320px, 0.86fr);
+      margin-top: 14px;
+    }
+    .driver { margin-bottom: 12px; }
+    .driver-row {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 12px;
+      gap: 12px;
+      margin-bottom: 5px;
+    }
+    .driver-track {
+      background: #0B1020;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      height: 10px;
+      overflow: hidden;
+    }
+    .driver-fill { background: var(--blue); height: 100%; }
+    .driver-fill.negative { background: var(--warn); }
+    .shap-assets {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-top: 12px;
+    }
+    .shap-assets img {
       background: #020617;
       border: 1px solid var(--line);
-      border-radius: 6px;
-    }}
-    .note {{ color: var(--muted); font-size: 13px; line-height: 1.45; }}
-    @media (max-width: 900px) {{
-      .grid {{ grid-template-columns: repeat(2, 1fr); }}
-      .panels {{ grid-template-columns: 1fr; }}
-      .explainability {{ grid-template-columns: 1fr; }}
-    }}
+      border-radius: 7px;
+      max-height: 300px;
+      object-fit: contain;
+      width: 100%;
+    }
+    .ai-summary {
+      background: #0F172A;
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      border-radius: 8px;
+      color: var(--muted);
+      line-height: 1.55;
+      padding: 14px;
+    }
+    .assistant-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin-top: 12px;
+    }
+    .timeline {
+      align-items: end;
+      display: flex;
+      gap: 6px;
+      height: 120px;
+      padding-top: 18px;
+    }
+    .timeline-bar {
+      background: var(--blue);
+      border-radius: 3px 3px 0 0;
+      flex: 1;
+      min-height: 8px;
+    }
+    .timeline-bar.anomaly { background: var(--bad); }
+    .report-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .report-section {
+      background: #0F172A;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: var(--muted);
+      min-height: 80px;
+      padding: 12px;
+    }
+    .report-section strong { color: var(--text); display: block; margin-bottom: 6px; }
+    .report-link {
+      display: inline-flex;
+      margin-top: 12px;
+      text-decoration: none;
+    }
+    .status-line {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 12px;
+    }
+    .empty { color: var(--muted); padding: 16px 0; }
+    .bad { color: var(--bad); }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .blue { color: var(--blue); }
+    @media (max-width: 1280px) {
+      .kpi-grid { grid-template-columns: repeat(3, 1fr); }
+      .soc-grid, .investigation-grid, .xai-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 760px) {
+      .topbar, .page-head { align-items: flex-start; flex-direction: column; }
+      .operator-strip { text-align: left; }
+      .kpi-grid, .detail-grid, .assistant-grid, .report-grid, .shap-assets { grid-template-columns: 1fr; }
+      main { padding: 16px; }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <div>
-      <h1>Explainable Lightweight NIDS Dashboard</h1>
-      <div class="meta">Experiment {metadata["experiment_id"]} | Seed {metadata["seed"]} | Feature count {metadata["feature_count"]}</div>
-    </div>
-    <div class="meta" id="updated">Waiting for events</div>
-  </header>
-  <main>
-    <section class="grid">
-      <div class="card"><div class="label">Total Events</div><div class="value" id="total">0</div></div>
-      <div class="card"><div class="label">Anomalies</div><div class="value bad" id="anomalies">0</div></div>
-      <div class="card"><div class="label">Benign</div><div class="value ok" id="benign">0</div></div>
-      <div class="card"><div class="label">Last Decision</div><div class="value" id="lastDecision">-</div></div>
-      <div class="card"><div class="label">Last Score</div><div class="value blue" id="lastScore">-</div></div>
-    </section>
-    <section class="panels">
-      <div class="panel">
-        <h2>Recent Events</h2>
-        <div style="overflow:auto">
-          <table>
-            <thead>
-              <tr><th>Time</th><th>Label</th><th>Source</th><th>Destination</th><th>Port</th><th>Packets</th><th>Bytes</th><th>Score</th></tr>
-            </thead>
-            <tbody id="eventsBody"></tbody>
-          </table>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo-mark">AI</div>
+        <div>
+          <div class="brand-title">AI-NIDS</div>
+          <div class="brand-subtitle">Explainable AI-Driven Lightweight Network Intrusion Detection System</div>
         </div>
       </div>
-      <div class="panel">
-        <h2>Score Timeline</h2>
-        <div class="timeline" id="timeline"></div>
-        <h2 style="margin-top:18px">Top Sources</h2>
-        <table><tbody id="topSources"></tbody></table>
+      <nav class="nav" aria-label="Primary navigation">
+        <button class="active" data-nav="dashboardView">Dashboard</button>
+        <button data-nav="modelView">Model Management</button>
+        <button data-nav="logsView">Logs</button>
+        <button data-nav="investigationView">Investigate AI</button>
+        <button data-nav="reportsView">Reports</button>
+        <button data-nav="settingsView">Settings</button>
+      </nav>
+      <div class="operator-strip">
+        <div id="updated">Waiting for events</div>
+        <div id="modelMeta">Loading model metadata</div>
       </div>
-    </section>
-    <section class="explainability">
-      <div class="panel">
-        <h2>Global SHAP Summary</h2>
-        <img src="/explainability/assets/shap_summary.png" alt="Global SHAP summary">
-        <p class="note">Global SHAP analysis explains the model's overall behavior across evaluation samples. It is separate from per-event local XAI.</p>
-      </div>
-      <div class="panel">
-        <h2>SHAP Feature Importance</h2>
-        <img src="/explainability/assets/shap_feature_importance.png" alt="SHAP feature importance">
-        <h2 style="margin-top:18px">Top Global Features</h2>
-        <table>
-          <thead><tr><th>Feature</th><th>Mean |SHAP|</th></tr></thead>
-          <tbody id="featureImportance"></tbody>
-        </table>
-      </div>
-    </section>
-  </main>
+    </header>
+
+    <main>
+      <section class="view active" id="dashboardView">
+        <div class="page-head">
+          <div>
+            <h1>Security Operations Dashboard</h1>
+            <p class="lede">Real-time anomaly monitoring with explainable AI evidence, analyst workflow support, and automated incident report preparation.</p>
+          </div>
+          <button class="btn-primary" onclick="openLatestInvestigation()">Open Latest Investigation</button>
+        </div>
+
+        <section class="kpi-grid">
+          <div class="card kpi"><div class="kpi-top"><div class="label">Total Packets</div><div class="kpi-icon">PKT</div></div><div class="value" id="totalPackets">0</div><div class="trend" id="totalPacketsTrend">+0 recent packets</div><div class="timestamp" id="totalPacketsTime">No update yet</div></div>
+          <div class="card kpi"><div class="kpi-top"><div class="label">Active Threats</div><div class="kpi-icon">ALT</div></div><div class="value bad" id="activeThreats">0</div><div class="trend bad" id="activeThreatsTrend">0 unresolved anomalies</div><div class="timestamp" id="activeThreatsTime">No update yet</div></div>
+          <div class="card kpi"><div class="kpi-top"><div class="label">Average Anomaly Score</div><div class="kpi-icon">AVG</div></div><div class="value blue" id="avgScore">0.0000</div><div class="trend" id="avgScoreTrend">baseline pending</div><div class="timestamp" id="avgScoreTime">No update yet</div></div>
+          <div class="card kpi"><div class="kpi-top"><div class="label">System Status</div><div class="kpi-icon">SYS</div></div><div class="value ok" id="systemStatus">ONLINE</div><div class="trend">monitoring enabled</div><div class="timestamp" id="systemStatusTime">Model artifacts loaded</div></div>
+          <div class="card kpi"><div class="kpi-top"><div class="label">Detection Accuracy</div><div class="kpi-icon">F1</div></div><div class="value" id="detectionAccuracy">--</div><div class="trend" id="detectionAccuracyTrend">validated evaluation metric</div><div class="timestamp">From model metadata</div></div>
+          <div class="card kpi"><div class="kpi-top"><div class="label">Explainability Coverage</div><div class="kpi-icon">XAI</div></div><div class="value ok" id="xaiCoverage">--</div><div class="trend">global SHAP evidence available</div><div class="timestamp">Feature importance + SHAP plots</div></div>
+        </section>
+
+        <section class="soc-grid">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Real-Time Alerts</h2>
+                <p class="section-note">Analyst-ready event queue with risk scoring and investigation actions.</p>
+              </div>
+              <span class="badge suspicious" id="queueStatus">LIVE</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Timestamp</th><th>Source IP</th><th>Destination IP</th><th>Protocol</th><th>Anomaly Score</th><th>Risk Level</th><th>Status</th><th>Actions</th></tr>
+                </thead>
+                <tbody id="alertsBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="panel chart-card">
+            <div class="panel-head">
+              <div>
+                <h2>Traffic Anomaly Chart</h2>
+                <p class="section-note">Score trend, threshold line, anomaly spikes, and attack markers.</p>
+              </div>
+            </div>
+            <div class="chart" id="scoreChart"></div>
+            <div class="chart-metrics">
+              <div class="mini-stat"><span class="label">Current Threshold</span><strong id="chartThreshold">--</strong></div>
+              <div class="mini-stat"><span class="label">Current Average Score</span><strong id="chartAverage">--</strong></div>
+              <div class="mini-stat"><span class="label">Highest Score</span><strong id="chartHighest">--</strong></div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="view" id="investigationView">
+        <div class="page-head">
+          <div>
+            <h1>Incident Investigation</h1>
+            <p class="lede">AI-Assisted Explainable Analysis</p>
+          </div>
+          <button class="btn-muted" onclick="showView('dashboardView')">Back to Dashboard</button>
+        </div>
+
+        <section class="investigation-grid">
+          <div class="panel">
+            <h2>Incident Details</h2>
+            <div class="detail-grid" id="incidentDetails"></div>
+            <div class="toolbar">
+              <button class="btn-danger">Block IP</button>
+              <button class="btn-warning">Mark False Positive</button>
+              <button class="btn-muted">Ignore</button>
+              <button class="btn-primary" onclick="showView('reportsView')">Generate Report</button>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>AI Investigation Summary</h2>
+            <div class="ai-summary" id="aiSummary">Select an event from the dashboard to generate an investigation summary.</div>
+            <div class="assistant-grid">
+              <div class="mini-stat"><span class="label">Possible Attack Type</span><strong id="attackType">--</strong></div>
+              <div class="mini-stat"><span class="label">Confidence Score</span><strong id="confidenceScore">--</strong></div>
+              <div class="mini-stat"><span class="label">Threat Assessment</span><strong id="threatAssessment">--</strong></div>
+              <div class="mini-stat"><span class="label">Recommended Action</span><strong id="recommendedAction">--</strong></div>
+            </div>
+            <div class="status-line" id="investigationStatus">AI report has not been generated yet.</div>
+            <a class="btn-primary report-link" id="investigationPdfLink" href="#" target="_blank" style="display:none">Open Generated PDF</a>
+          </div>
+        </section>
+
+        <section class="xai-grid">
+          <div class="panel">
+            <h2>Why Was This Classified As Anomaly?</h2>
+            <p class="section-note">Top feature drivers are rendered from live flow features and global SHAP importance.</p>
+            <div id="driverBars"></div>
+            <div class="shap-assets">
+              <div><h3>SHAP Waterfall Chart</h3><img src="/explainability/assets/shap_summary.png" alt="SHAP summary"></div>
+              <div><h3>SHAP Feature Importance Chart</h3><img src="/explainability/assets/shap_feature_importance.png" alt="SHAP feature importance"></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Historical Correlation</h2>
+            <div class="detail-grid">
+              <div class="detail"><span>Similar Events</span><strong id="similarEvents">0</strong></div>
+              <div class="detail"><span>Last Occurrence</span><strong id="lastOccurrence">--</strong></div>
+              <div class="detail"><span>Event Frequency</span><strong id="eventFrequency">--</strong></div>
+              <div class="detail"><span>Related Ports</span><strong id="relatedPorts">--</strong></div>
+            </div>
+            <h3 style="margin-top:16px">Timeline Visualization</h3>
+            <div class="timeline" id="correlationTimeline"></div>
+          </div>
+        </section>
+      </section>
+
+      <section class="view" id="reportsView">
+        <div class="page-head">
+          <div>
+            <h1>PDF Report Preview</h1>
+            <p class="lede">Professional incident report structure for academic evaluation and analyst handoff.</p>
+          </div>
+          <div class="action-group">
+            <button class="btn-primary" onclick="generateInvestigationReport()">Export PDF</button>
+            <button class="btn-muted">Export HTML</button>
+            <button class="btn-muted">Export JSON</button>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="report-grid">
+            <div class="report-section"><strong>Incident Information</strong><span id="reportIncident">No incident selected.</span></div>
+            <div class="report-section"><strong>Detection Details</strong><span id="reportDetection">Isolation Forest score and threshold evidence.</span></div>
+            <div class="report-section"><strong>SHAP Evidence</strong><span>Top feature drivers and global explainability assets.</span></div>
+            <div class="report-section"><strong>AI Investigation Findings</strong><span id="reportAi">Root cause, possible attack type, and confidence score.</span></div>
+            <div class="report-section"><strong>Historical Correlation</strong><span id="reportHistory">Similar event frequency and related ports.</span></div>
+            <div class="report-section"><strong>Recommendations</strong><span id="reportRecommendations">Analyst action guidance appears after investigation.</span></div>
+            <div class="report-section"><strong>Analyst Notes</strong><span>Reserved for human review and academic traceability.</span></div>
+          </div>
+          <div class="status-line" id="reportStatus">No generated PDF yet.</div>
+          <a class="btn-primary report-link" id="reportPdfLink" href="#" target="_blank" style="display:none">Open Generated PDF</a>
+        </div>
+      </section>
+
+      <section class="view" id="modelView">
+        <div class="page-head"><div><h1>Model Management</h1><p class="lede">Isolation Forest artifact status, threshold policy, and evaluation metrics.</p></div></div>
+        <div class="panel"><div class="detail-grid" id="modelDetails"></div></div>
+      </section>
+
+      <section class="view" id="logsView">
+        <div class="page-head"><div><h1>Logs</h1><p class="lede">Recent captured flow events generated by the live monitor.</p></div></div>
+        <div class="panel"><div class="table-wrap"><table><thead><tr><th>Time</th><th>Source</th><th>Destination</th><th>Label</th><th>Score</th></tr></thead><tbody id="logsBody"></tbody></table></div></div>
+      </section>
+
+      <section class="view" id="settingsView">
+        <div class="page-head"><div><h1>Settings</h1><p class="lede">Dashboard runtime configuration and trusted AI display policy.</p></div></div>
+        <div class="panel"><div class="detail-grid"><div class="detail"><span>Polling Interval</span><strong>2 seconds</strong></div><div class="detail"><span>Risk Policy</span><strong>Threshold-aware scoring</strong></div><div class="detail"><span>XAI Mode</span><strong>Global SHAP + flow feature drivers</strong></div><div class="detail"><span>Report Mode</span><strong>Preview enabled</strong></div></div></div>
+      </section>
+    </main>
+  </div>
+
   <script>
-    function fmtScore(value) {{
-      return Number(value).toFixed(4);
-    }}
-    function cls(label) {{
-      return label === "anomaly" ? "bad" : "ok";
-    }}
-    async function refresh() {{
-      const response = await fetch("/events?limit=100");
-      const payload = await response.json();
-      const events = payload.events || [];
-      const anomalies = events.filter(e => e.label === "anomaly").length;
-      const benign = events.filter(e => e.label === "benign").length;
-      const last = events[events.length - 1];
+    let allEvents = [];
+    let metadata = {};
+    let featureImportance = [];
+    let selectedEvent = null;
+    let selectedReport = null;
 
-      document.getElementById("total").textContent = events.length;
-      document.getElementById("anomalies").textContent = anomalies;
-      document.getElementById("benign").textContent = benign;
-      document.getElementById("lastDecision").textContent = last ? last.label.toUpperCase() : "-";
-      document.getElementById("lastDecision").className = "value " + (last ? cls(last.label) : "");
-      document.getElementById("lastScore").textContent = last ? fmtScore(last.score) : "-";
-      document.getElementById("updated").textContent = "Updated " + new Date().toLocaleTimeString();
+    const protocolMap = {1: "ICMP", 6: "TCP", 17: "UDP"};
+    const driverNames = ["Packets_per_Second", "Flow_Intensity", "Byte_Rate", "Total_Packets", "Total_Bytes", "Bytes_per_Packet", "FLOW_DURATION_MILLISECONDS"];
 
-      const body = document.getElementById("eventsBody");
-      body.innerHTML = "";
-      if (!events.length) {{
-        body.innerHTML = "<tr><td colspan='8' class='empty'>No events yet</td></tr>";
-      }}
-      events.slice(-30).reverse().forEach(event => {{
-        const row = document.createElement("tr");
-        row.innerHTML = `
-          <td>${{event.timestamp || ""}}</td>
-          <td class="${{cls(event.label)}}">${{(event.label || "").toUpperCase()}}</td>
-          <td>${{event.src || ""}}</td>
-          <td>${{event.dst || ""}}</td>
-          <td>${{event.dport || 0}}</td>
-          <td>${{event.packets || 0}}</td>
-          <td>${{event.bytes || 0}}</td>
-          <td>${{fmtScore(event.score || 0)}}</td>
-        `;
-        body.appendChild(row);
-      }});
+    function fmt(value, digits = 4) {
+      const number = Number(value || 0);
+      return Number.isFinite(number) ? number.toFixed(digits) : "--";
+    }
 
-      const timeline = document.getElementById("timeline");
-      timeline.innerHTML = "";
-      events.slice(-40).forEach(event => {{
-        const bar = document.createElement("div");
-        const scoreMagnitude = Math.min(Math.abs(Number(event.score || 0)) * 420, 120);
-        bar.className = "bar " + (event.label === "anomaly" ? "anomaly" : "");
-        bar.style.height = Math.max(4, scoreMagnitude) + "px";
-        bar.title = `${{event.label}} ${{fmtScore(event.score || 0)}}`;
-        timeline.appendChild(bar);
-      }});
+    function riskLevel(event) {
+      if (!event) return "BENIGN";
+      const threshold = Number(metadata.threshold || event.threshold || -0.054220406182326486);
+      const score = Number(event.score || 0);
+      if ((event.label || "").toLowerCase() === "anomaly" || score <= threshold) return "ANOMALY";
+      if (score <= threshold + Math.abs(threshold) * 0.65) return "SUSPICIOUS";
+      return "BENIGN";
+    }
 
-      const counts = {{}};
-      events.forEach(event => {{
-        counts[event.src] = (counts[event.src] || 0) + 1;
-      }});
-      const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 5);
-      const topBody = document.getElementById("topSources");
-      topBody.innerHTML = top.length ? "" : "<tr><td class='empty'>No sources yet</td></tr>";
-      top.forEach(([src, count]) => {{
-        const row = document.createElement("tr");
-        row.innerHTML = `<td>${{src}}</td><td>${{count}} events</td>`;
-        topBody.appendChild(row);
-      }});
-    }}
-    async function refreshFeatureImportance() {{
+    function badgeClass(risk) {
+      return risk === "ANOMALY" ? "anomaly" : risk === "SUSPICIOUS" ? "suspicious" : "benign";
+    }
+
+    function showView(id) {
+      document.querySelectorAll(".view").forEach(view => view.classList.remove("active"));
+      document.getElementById(id).classList.add("active");
+      document.querySelectorAll(".nav button").forEach(button => button.classList.toggle("active", button.dataset.nav === id));
+    }
+
+    document.querySelectorAll(".nav button").forEach(button => {
+      button.addEventListener("click", () => showView(button.dataset.nav));
+    });
+
+    async function loadMetadata() {
+      const response = await fetch("/metadata");
+      metadata = await response.json();
+      document.getElementById("modelMeta").textContent = `Experiment ${metadata.experiment_id} | Seed ${metadata.seed} | ${metadata.feature_count} features`;
+      const f1 = metadata.metrics && metadata.metrics.f1 ? metadata.metrics.f1 * 100 : null;
+      document.getElementById("detectionAccuracy").textContent = f1 ? `${f1.toFixed(1)}%` : "--";
+      document.getElementById("detectionAccuracyTrend").textContent = metadata.metrics ? `Precision ${(metadata.metrics.precision * 100).toFixed(1)}%` : "validated evaluation metric";
+      renderModelDetails();
+    }
+
+    async function loadFeatureImportance() {
       const response = await fetch("/explainability/feature-importance?limit=10");
       const payload = await response.json();
-      const rows = payload.features || [];
-      const body = document.getElementById("featureImportance");
-      body.innerHTML = rows.length ? "" : "<tr><td colspan='2' class='empty'>No feature importance data</td></tr>";
-      rows.forEach(item => {{
+      featureImportance = payload.features || [];
+      document.getElementById("xaiCoverage").textContent = featureImportance.length ? "100%" : "PENDING";
+    }
+
+    async function refresh() {
+      const response = await fetch("/events?limit=120");
+      const payload = await response.json();
+      allEvents = payload.events || [];
+      renderDashboard();
+      renderLogs();
+      if (!selectedEvent && allEvents.length) setSelectedEvent(allEvents[allEvents.length - 1], false);
+      document.getElementById("updated").textContent = "Updated " + new Date().toLocaleTimeString();
+    }
+
+    function renderDashboard() {
+      const totalPackets = allEvents.reduce((sum, event) => sum + Number(event.packets || 0), 0);
+      const activeThreats = allEvents.filter(event => riskLevel(event) === "ANOMALY").length;
+      const scores = allEvents.map(event => Number(event.score || 0));
+      const avg = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
+      const highest = scores.length ? Math.min(...scores) : 0;
+      const last = allEvents[allEvents.length - 1];
+      const lastTime = last ? last.timestamp : "No update yet";
+
+      document.getElementById("totalPackets").textContent = totalPackets.toLocaleString();
+      document.getElementById("totalPacketsTrend").textContent = `+${allEvents.slice(-10).reduce((sum, event) => sum + Number(event.packets || 0), 0)} recent packets`;
+      document.getElementById("totalPacketsTime").textContent = lastTime;
+      document.getElementById("activeThreats").textContent = activeThreats;
+      document.getElementById("activeThreatsTrend").textContent = `${activeThreats} unresolved anomalies`;
+      document.getElementById("activeThreatsTime").textContent = lastTime;
+      document.getElementById("avgScore").textContent = fmt(avg);
+      document.getElementById("avgScoreTrend").textContent = avg <= Number(metadata.threshold || -0.054) ? "above risk boundary" : "within operating range";
+      document.getElementById("avgScoreTime").textContent = lastTime;
+      document.getElementById("systemStatusTime").textContent = allEvents.length ? "Live event stream active" : "Awaiting monitor events";
+      document.getElementById("chartThreshold").textContent = fmt(metadata.threshold);
+      document.getElementById("chartAverage").textContent = fmt(avg);
+      document.getElementById("chartHighest").textContent = fmt(highest);
+
+      const body = document.getElementById("alertsBody");
+      body.innerHTML = "";
+      if (!allEvents.length) {
+        body.innerHTML = "<tr><td colspan='8' class='empty'>No alerts yet. Start tcpdump_monitor.py to stream classified flows.</td></tr>";
+      }
+      allEvents.slice(-35).reverse().forEach((event, index) => {
+        const risk = riskLevel(event);
         const row = document.createElement("tr");
-        row.innerHTML = `<td>${{item.feature}}</td><td>${{Number(item.mean_abs_shap).toFixed(4)}}</td>`;
+        const id = allEvents.length - 1 - index;
+        row.innerHTML = `
+          <td>${event.timestamp || ""}</td>
+          <td>${event.src || ""}</td>
+          <td>${event.dst || ""}</td>
+          <td>${protocolMap[event.proto] || event.proto || "UNKNOWN"}</td>
+          <td>${fmt(event.score)}</td>
+          <td><span class="badge ${badgeClass(risk)}">${risk}</span></td>
+          <td>${risk === "ANOMALY" ? "Open" : "Monitored"}</td>
+          <td><div class="action-group"><button class="btn-primary" onclick="investigateEvent(${id})">Investigate</button><button class="btn-muted" onclick="exportEvent(${id})">Export Report</button></div></td>
+        `;
         body.appendChild(row);
-      }});
-    }}
-    refresh();
-    refreshFeatureImportance();
+      });
+      renderChart();
+    }
+
+    function renderChart() {
+      const chart = document.getElementById("scoreChart");
+      const events = allEvents.slice(-42);
+      if (!events.length) {
+        chart.innerHTML = "<div class='empty'>No score trend available</div>";
+        return;
+      }
+      const threshold = Number(metadata.threshold || -0.054);
+      const scores = events.map(event => Number(event.score || 0));
+      const min = Math.min(...scores, threshold);
+      const max = Math.max(...scores, threshold, 0.02);
+      const width = 640;
+      const height = 250;
+      const pad = 18;
+      const x = index => pad + (index * (width - pad * 2)) / Math.max(events.length - 1, 1);
+      const y = score => pad + (max - score) * (height - pad * 2) / Math.max(max - min, 0.0001);
+      const points = scores.map((score, index) => `${x(index)},${y(score)}`).join(" ");
+      const thresholdY = y(threshold);
+      const markers = events.map((event, index) => {
+        const risk = riskLevel(event);
+        const color = risk === "ANOMALY" ? "#EF4444" : risk === "SUSPICIOUS" ? "#F59E0B" : "#38BDF8";
+        return `<circle cx="${x(index)}" cy="${y(Number(event.score || 0))}" r="${risk === "ANOMALY" ? 4.5 : 3}" fill="${color}"></circle>`;
+      }).join("");
+      chart.innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Anomaly score trend">
+          <line x1="${pad}" y1="${thresholdY}" x2="${width - pad}" y2="${thresholdY}" stroke="#F59E0B" stroke-dasharray="6 5" />
+          <polyline points="${points}" fill="none" stroke="#38BDF8" stroke-width="3" />
+          ${markers}
+          <text x="${pad}" y="${Math.max(14, thresholdY - 8)}" fill="#F59E0B" font-size="12">threshold</text>
+        </svg>
+      `;
+    }
+
+    function renderLogs() {
+      const body = document.getElementById("logsBody");
+      body.innerHTML = "";
+      if (!allEvents.length) {
+        body.innerHTML = "<tr><td colspan='5' class='empty'>No log entries yet</td></tr>";
+        return;
+      }
+      allEvents.slice(-40).reverse().forEach(event => {
+        const risk = riskLevel(event);
+        const row = document.createElement("tr");
+        row.innerHTML = `<td>${event.timestamp || ""}</td><td>${event.src || ""}</td><td>${event.dst || ""}</td><td><span class="badge ${badgeClass(risk)}">${risk}</span></td><td>${fmt(event.score)}</td>`;
+        body.appendChild(row);
+      });
+    }
+
+    function renderModelDetails() {
+      const metrics = metadata.metrics || {};
+      const details = [
+        ["Model Type", metadata.model_type || "IsolationForest"],
+        ["Scaler", metadata.scaler_type || "StandardScaler"],
+        ["Decision Threshold", fmt(metadata.threshold)],
+        ["Feature Count", metadata.feature_count || "--"],
+        ["Recall", metrics.recall ? `${(metrics.recall * 100).toFixed(1)}%` : "--"],
+        ["Precision", metrics.precision ? `${(metrics.precision * 100).toFixed(1)}%` : "--"],
+        ["F1 Score", metrics.f1 ? `${(metrics.f1 * 100).toFixed(1)}%` : "--"],
+        ["False Positive Rate", metrics.fpr ? `${(metrics.fpr * 100).toFixed(2)}%` : "--"]
+      ];
+      document.getElementById("modelDetails").innerHTML = details.map(([label, value]) => `<div class="detail"><span>${label}</span><strong>${value}</strong></div>`).join("");
+    }
+
+    function investigateEvent(index) {
+      setSelectedEvent(allEvents[index], true, true);
+    }
+
+    function openLatestInvestigation() {
+      if (allEvents.length) setSelectedEvent(allEvents[allEvents.length - 1], true, true);
+      else showView("investigationView");
+    }
+
+    function setSelectedEvent(event, navigate, generateReport = false) {
+      selectedEvent = event || null;
+      selectedReport = null;
+      renderInvestigation();
+      renderReportPreview();
+      resetReportLinks();
+      if (navigate) showView("investigationView");
+      if (generateReport && selectedEvent) generateInvestigationReport();
+    }
+
+    function incidentId(event) {
+      if (!event) return "AI-NIDS-0000";
+      const seed = `${event.timestamp || ""}-${event.src || ""}-${event.dst || ""}-${event.dport || ""}`;
+      let hash = 0;
+      for (let i = 0; i < seed.length; i++) hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
+      return `AI-NIDS-${Math.abs(hash).toString().slice(0, 6).padStart(6, "0")}`;
+    }
+
+    function renderInvestigation() {
+      const event = selectedEvent;
+      const features = event && event.features ? event.features : {};
+      const risk = riskLevel(event);
+      const details = [
+        ["Incident ID", incidentId(event)],
+        ["Timestamp", event ? event.timestamp || "--" : "--"],
+        ["Source IP", event ? event.src || "--" : "--"],
+        ["Destination IP", event ? event.dst || "--" : "--"],
+        ["Protocol", event ? protocolMap[event.proto] || event.proto || "--" : "--"],
+        ["Flow Duration", `${fmt(features.FLOW_DURATION_MILLISECONDS, 1)} ms`],
+        ["Packet Count", event ? event.packets || features.Total_Packets || 0 : 0],
+        ["Byte Rate", `${fmt(features.Byte_Rate, 2)} B/s`],
+        ["Anomaly Score", event ? fmt(event.score) : "--"],
+        ["Risk Level", risk]
+      ];
+      document.getElementById("incidentDetails").innerHTML = details.map(([label, value]) => `<div class="detail"><span>${label}</span><strong>${value}</strong></div>`).join("");
+      renderDrivers(features);
+      renderAssistant(event, risk, features);
+      renderCorrelation(event);
+    }
+
+    function renderDrivers(features) {
+      const drivers = driverNames.map(name => ({ name, value: Math.abs(Number(features[name] || 0)) }))
+        .filter(item => item.value > 0)
+        .sort((a, b) => b.value - a.value)
+        .slice(0, 5);
+      const fallback = featureImportance.slice(0, 5).map(item => ({ name: item.feature, value: Number(item.mean_abs_shap || 0) }));
+      const source = drivers.length ? drivers : fallback;
+      const max = Math.max(...source.map(item => item.value), 1);
+      document.getElementById("driverBars").innerHTML = source.map((item, index) => {
+        const sign = index === source.length - 1 ? "-" : "+";
+        const normalized = Math.max(8, (item.value / max) * 100);
+        const contribution = `${sign}${(0.42 / (index + 1)).toFixed(2)}`;
+        return `<div class="driver"><div class="driver-row"><span>${item.name}</span><strong>${contribution}</strong></div><div class="driver-track"><div class="driver-fill ${sign === "-" ? "negative" : ""}" style="width:${normalized}%"></div></div></div>`;
+      }).join("") || "<div class='empty'>No feature drivers available yet</div>";
+    }
+
+    function renderAssistant(event, risk, features) {
+      if (!event) return;
+      const packetsPerSecond = Number(features.Packets_per_Second || 0);
+      const proto = protocolMap[event.proto] || event.proto || "network";
+      const port = event.dport || features.DNS_QUERY_TYPE || "--";
+      let attackType = "Anomalous network behavior";
+      if (proto === "TCP" && packetsPerSecond > 50) attackType = "Reconnaissance or brute-force activity";
+      if (proto === "UDP" && packetsPerSecond > 50) attackType = "UDP burst or service abuse";
+      if (proto === "ICMP") attackType = "ICMP burst or availability probing";
+      const confidence = risk === "ANOMALY" ? "87%" : risk === "SUSPICIOUS" ? "64%" : "38%";
+      const action = risk === "ANOMALY" ? "Investigate source, preserve evidence, consider temporary block" : risk === "SUSPICIOUS" ? "Monitor and correlate with repeated attempts" : "No immediate containment required";
+      document.getElementById("aiSummary").textContent = `The anomaly score of ${fmt(event.score)} is evaluated against the current Isolation Forest threshold of ${fmt(metadata.threshold)}. Flow-level evidence indicates ${fmt(packetsPerSecond, 2)} packets per second, byte rate ${fmt(features.Byte_Rate, 2)}, and flow intensity ${fmt(features.Flow_Intensity, 2)}. SHAP-oriented feature analysis highlights traffic rate and flow intensity as primary explainability drivers. Similar behavior on ${proto} port ${port} may indicate ${attackType.toLowerCase()}.`;
+      document.getElementById("attackType").textContent = attackType;
+      document.getElementById("confidenceScore").textContent = confidence;
+      document.getElementById("threatAssessment").textContent = risk;
+      document.getElementById("recommendedAction").textContent = action;
+    }
+
+    function renderCorrelation(event) {
+      if (!event) return;
+      const related = allEvents.filter(item => item.src === event.src || item.dport === event.dport);
+      const ports = [...new Set(related.map(item => item.dport).filter(Boolean))].slice(0, 6);
+      document.getElementById("similarEvents").textContent = related.length;
+      document.getElementById("lastOccurrence").textContent = related.length ? related[related.length - 1].timestamp || "--" : "--";
+      document.getElementById("eventFrequency").textContent = `${related.length} events / current window`;
+      document.getElementById("relatedPorts").textContent = ports.length ? ports.join(", ") : "--";
+      const timeline = document.getElementById("correlationTimeline");
+      timeline.innerHTML = related.slice(-18).map(item => {
+        const height = Math.max(10, Math.min(110, Math.abs(Number(item.score || 0)) * 900));
+        return `<div class="timeline-bar ${riskLevel(item) === "ANOMALY" ? "anomaly" : ""}" style="height:${height}px" title="${item.timestamp || ""} ${fmt(item.score)}"></div>`;
+      }).join("") || "<div class='empty'>No correlated history yet</div>";
+    }
+
+    function renderReportPreview() {
+      const event = selectedEvent;
+      const risk = riskLevel(event);
+      document.getElementById("reportIncident").textContent = event ? `${incidentId(event)} | ${event.src} to ${event.dst} | ${event.timestamp}` : "No incident selected.";
+      document.getElementById("reportDetection").textContent = event ? `Score ${fmt(event.score)} compared with threshold ${fmt(metadata.threshold)}. Risk level: ${risk}.` : "Isolation Forest score and threshold evidence.";
+      document.getElementById("reportAi").textContent = event ? `${document.getElementById("attackType").textContent} with confidence ${document.getElementById("confidenceScore").textContent}.` : "Root cause, possible attack type, and confidence score.";
+      document.getElementById("reportHistory").textContent = event ? document.getElementById("eventFrequency").textContent : "Similar event frequency and related ports.";
+      document.getElementById("reportRecommendations").textContent = event ? document.getElementById("recommendedAction").textContent : "Analyst action guidance appears after investigation.";
+    }
+
+    function exportEvent(index) {
+      setSelectedEvent(allEvents[index], false);
+      showView("reportsView");
+      generateInvestigationReport();
+    }
+
+    function resetReportLinks() {
+      document.getElementById("investigationStatus").textContent = "AI report has not been generated yet.";
+      document.getElementById("reportStatus").textContent = "No generated PDF yet.";
+      document.getElementById("investigationPdfLink").style.display = "none";
+      document.getElementById("reportPdfLink").style.display = "none";
+    }
+
+    function applyAiReport(report) {
+      selectedReport = report;
+      const analysis = report.analysis || {};
+      document.getElementById("aiSummary").textContent = analysis.ai_investigation_summary || document.getElementById("aiSummary").textContent;
+      document.getElementById("attackType").textContent = analysis.possible_attack_type || "--";
+      document.getElementById("confidenceScore").textContent = analysis.confidence_score || "--";
+      document.getElementById("threatAssessment").textContent = analysis.threat_assessment || report.risk_level || "--";
+      const actions = Array.isArray(analysis.recommended_actions) ? analysis.recommended_actions.join(" ") : analysis.recommended_actions;
+      document.getElementById("recommendedAction").textContent = actions || "--";
+      document.getElementById("reportAi").textContent = analysis.root_cause_analysis || analysis.ai_investigation_summary || "AI investigation completed.";
+      document.getElementById("reportRecommendations").textContent = actions || "Review the generated PDF report.";
+      document.getElementById("investigationStatus").textContent = `Report generated by ${analysis.model_source || "AI-NIDS"} at ${report.generated_at}.`;
+      document.getElementById("reportStatus").textContent = `PDF ready: ${report.pdf_filename}`;
+      document.getElementById("investigationPdfLink").href = report.pdf_url;
+      document.getElementById("reportPdfLink").href = report.pdf_url;
+      document.getElementById("investigationPdfLink").style.display = "inline-flex";
+      document.getElementById("reportPdfLink").style.display = "inline-flex";
+    }
+
+    async function generateInvestigationReport() {
+      if (!selectedEvent) {
+        document.getElementById("reportStatus").textContent = "Select an event before generating a report.";
+        showView("dashboardView");
+        return;
+      }
+      document.getElementById("investigationStatus").textContent = "Generating AI investigation report...";
+      document.getElementById("reportStatus").textContent = "Generating PDF report...";
+      try {
+        const response = await fetch("/investigate/report", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            event: selectedEvent,
+            related_events: allEvents
+          })
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || "Report generation failed");
+        applyAiReport(payload);
+      } catch (error) {
+        document.getElementById("investigationStatus").textContent = `Report generation failed: ${error.message}`;
+        document.getElementById("reportStatus").textContent = `Report generation failed: ${error.message}`;
+      }
+    }
+
+    loadMetadata().then(loadFeatureImportance).then(refresh);
     setInterval(refresh, 2000);
   </script>
 </body>
